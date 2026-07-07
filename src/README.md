@@ -44,6 +44,10 @@ The plugin adds:
 
 Use `9` as the reference VAT rate when your shipping method is currently configured as excluding 9% VAT.
 
+## Customer Display
+
+The plugin shows the shipping VAT breakdown on the cart and checkout pages. Customers can see how the shipping costs are split across the VAT rates in their order.
+
 ## Development Status
 
 This is an initial implementation. Before public release, test it against:
