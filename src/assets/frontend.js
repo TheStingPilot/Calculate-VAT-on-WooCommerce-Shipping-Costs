@@ -9,8 +9,13 @@
 		'.wc-block-components-totals-shipping',
 		'.wc-block-components-totals-footer-item',
 		'.wp-block-woocommerce-cart-order-summary-block',
-		'.wp-block-woocommerce-checkout-order-summary-block'
+		'.wp-block-woocommerce-checkout-order-summary-block',
+		'.cart_totals',
+		'#order_review',
+		'.woocommerce-checkout-review-order'
 	];
+	var isRefreshing = false;
+	var refreshTimer = null;
 
 	function hasClassicBreakdown() {
 		return !! document.querySelector( '.wcprsv-vat-breakdown, [data-wcprsv-breakdown]' );
@@ -52,6 +57,12 @@
 	}
 
 	function refresh() {
+		if ( isRefreshing ) {
+			return;
+		}
+
+		isRefreshing = true;
+
 		window.fetch(
 			window.wcprsvData.endpoint,
 			{
@@ -69,19 +80,19 @@
 					render( data.html );
 				}
 			} )
-			.catch( function () {} );
+			.catch( function () {} )
+			.finally( function () {
+				isRefreshing = false;
+			} );
 	}
 
-	document.addEventListener( 'DOMContentLoaded', refresh );
-	document.body.addEventListener( 'wc-blocks_added_to_cart', refresh );
-	document.body.addEventListener( 'wc-blocks_removed_from_cart', refresh );
-	document.body.addEventListener( 'wc-blocks_updated_cart_totals', refresh );
+	function scheduleRefresh() {
+		window.clearTimeout( refreshTimer );
+		refreshTimer = window.setTimeout( refresh, 350 );
+	}
 
-	var observer = new MutationObserver( function () {
-		if ( ! document.querySelector( '.wcprsv-block-breakdown' ) ) {
-			refresh();
-		}
-	} );
-
-	observer.observe( document.body, { childList: true, subtree: true } );
+	document.addEventListener( 'DOMContentLoaded', scheduleRefresh );
+	document.body.addEventListener( 'wc-blocks_added_to_cart', scheduleRefresh );
+	document.body.addEventListener( 'wc-blocks_removed_from_cart', scheduleRefresh );
+	document.body.addEventListener( 'wc-blocks_updated_cart_totals', scheduleRefresh );
 }() );

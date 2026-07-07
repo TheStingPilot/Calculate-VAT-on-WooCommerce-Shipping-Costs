@@ -29,12 +29,27 @@ class WCPRSV_Calculator {
 		$price_decimals                  = max( 0, (int) $price_decimals );
 
 		$shipping_including_vat = $shipping_excluding_reference_vat * ( 1 + $reference_vat_rate );
+
+		return $this->calculate_from_including_vat( $shipping_including_vat, $goods_by_tax_rate, $price_decimals );
+	}
+
+	/**
+	 * Calculate pro-rata shipping amounts from an inclusive shipping amount.
+	 *
+	 * @param float $shipping_including_vat Shipping amount including VAT.
+	 * @param array $goods_by_tax_rate Goods totals keyed by tax rate ID. Each item requires amount_ex_vat and rate.
+	 * @param int   $price_decimals Number of decimals to use for monetary output.
+	 * @return array
+	 */
+	public function calculate_from_including_vat( $shipping_including_vat, array $goods_by_tax_rate, $price_decimals = 2 ) {
+		$shipping_including_vat = max( 0.0, (float) $shipping_including_vat );
+		$price_decimals        = max( 0, (int) $price_decimals );
 		$total_goods           = $this->sum_goods( $goods_by_tax_rate );
 
 		if ( $shipping_including_vat <= 0 || $total_goods <= 0 ) {
 			return array(
 				'shipping_including_vat' => round( $shipping_including_vat, $price_decimals ),
-				'shipping_excluding_vat' => round( $shipping_excluding_reference_vat, $price_decimals ),
+				'shipping_excluding_vat' => round( $shipping_including_vat, $price_decimals ),
 				'taxes'                  => array(),
 				'lines'                  => array(),
 			);

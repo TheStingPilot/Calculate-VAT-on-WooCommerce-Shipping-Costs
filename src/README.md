@@ -46,7 +46,7 @@ Use `9` as the reference VAT rate when your shipping method is currently configu
 
 ## Customer Display
 
-The plugin shows the shipping VAT breakdown on the cart and checkout pages. Customers can see how the shipping costs are split across the VAT rates in their order.
+The plugin shows a compact VAT build-up on the cart and checkout pages. Customers can see the VAT per rate at a glance and open the calculation details for goods excluding VAT, shipping excluding VAT, goods VAT, shipping VAT, and total including VAT.
 
 ## Development Status
 

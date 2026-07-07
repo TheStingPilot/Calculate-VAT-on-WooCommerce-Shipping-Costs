@@ -4,7 +4,7 @@ Tags: woocommerce, vat, tax, shipping, netherlands
 Requires at least: 6.0
 Tested up to: 6.6
 Requires PHP: 7.4
-Stable tag: 0.1.1
+Stable tag: 0.1.6
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -47,6 +47,23 @@ The plugin uses WooCommerce tax rates configured for the products in the cart. I
 Shipping rates with a zero cost are left unchanged.
 
 == Changelog ==
+
+= 0.1.6 =
+* Reconcile the displayed VAT breakdown with WooCommerce cart totals so the visible breakdown, checkout total, and accounting export stay aligned.
+
+= 0.1.5 =
+* Round the customer-facing VAT breakdown per visible cell so displayed totals add up exactly.
+
+= 0.1.4 =
+* Improve the VAT breakdown layout with a compact summary and expandable calculation details.
+
+= 0.1.3 =
+* Show the full VAT build-up for goods and shipping on cart and checkout pages.
+* Add a direct cart-total fallback for the customer-facing breakdown.
+
+= 0.1.2 =
+* Improve cart and checkout breakdown placement.
+* Prevent repeated block checkout refresh calls.
 
 = 0.1.1 =
 * Show the pro-rata shipping VAT calculation on cart and checkout pages.

@@ -64,8 +64,8 @@ class WCPRSV_Plugin {
 		$this->settings->init();
 
 		add_filter( 'woocommerce_package_rates', array( $this, 'recalculate_package_rates' ), 100, 2 );
-		add_action( 'woocommerce_cart_totals_after_shipping', array( $this, 'render_classic_breakdown' ) );
-		add_action( 'woocommerce_review_order_after_shipping', array( $this, 'render_classic_breakdown' ) );
+		add_action( 'woocommerce_cart_totals_after_order_total', array( $this, 'render_classic_breakdown' ) );
+		add_action( 'woocommerce_review_order_after_order_total', array( $this, 'render_classic_breakdown' ) );
 		add_action( 'wp_enqueue_scripts', array( $this, 'enqueue_frontend_assets' ) );
 		add_action( 'rest_api_init', array( $this, 'register_storefront_endpoint' ) );
 	}
@@ -159,6 +159,13 @@ class WCPRSV_Plugin {
 			true
 		);
 
+		wp_enqueue_style(
+			'wcprsv-frontend',
+			plugins_url( 'assets/frontend.css', WCPRSV_FILE ),
+			array(),
+			WCPRSV_VERSION
+		);
+
 		wp_localize_script(
 			'wcprsv-frontend',
 			'wcprsvData',
@@ -194,10 +201,6 @@ class WCPRSV_Plugin {
 	public function get_breakdown_response() {
 		if ( function_exists( 'wc_load_cart' ) ) {
 			wc_load_cart();
-		}
-
-		if ( WC()->cart ) {
-			WC()->cart->calculate_totals();
 		}
 
 		$breakdown = $this->get_selected_shipping_breakdown();
@@ -267,7 +270,82 @@ class WCPRSV_Plugin {
 			}
 		}
 
-		return $combined;
+		if ( ! empty( $combined['lines'] ) ) {
+			return $combined;
+		}
+
+		return $this->calculate_current_cart_breakdown();
+	}
+
+	/**
+	 * Calculate the display breakdown directly from the current cart totals.
+	 *
+	 * @return array
+	 */
+	private function calculate_current_cart_breakdown() {
+		if ( ! WC()->cart ) {
+			return array();
+		}
+
+		$goods_by_tax_rate = $this->get_goods_by_tax_rate(
+			array(
+				'contents' => WC()->cart->get_cart(),
+			)
+		);
+
+		if ( empty( $goods_by_tax_rate ) ) {
+			return array();
+		}
+
+		$shipping_including_vat = $this->get_current_shipping_including_vat();
+
+		if ( $shipping_including_vat <= 0 ) {
+			return array();
+		}
+
+		return $this->calculator->calculate_from_including_vat(
+			$shipping_including_vat,
+			$goods_by_tax_rate,
+			wc_get_price_decimals()
+		);
+	}
+
+	/**
+	 * Get selected shipping including VAT from cart totals or selected package rates.
+	 *
+	 * @return float
+	 */
+	private function get_current_shipping_including_vat() {
+		$shipping_including_vat = (float) WC()->cart->get_shipping_total() + (float) WC()->cart->get_shipping_tax();
+
+		if ( $shipping_including_vat > 0 ) {
+			return $shipping_including_vat;
+		}
+
+		if ( ! WC()->shipping() || ! WC()->session ) {
+			return 0.0;
+		}
+
+		$packages       = WC()->shipping()->get_packages();
+		$chosen_methods = WC()->session->get( 'chosen_shipping_methods', array() );
+
+		foreach ( $packages as $package_index => $package ) {
+			$chosen_rate_id = $chosen_methods[ $package_index ] ?? '';
+
+			if ( empty( $chosen_rate_id ) || empty( $package['rates'][ $chosen_rate_id ] ) ) {
+				continue;
+			}
+
+			$rate = $package['rates'][ $chosen_rate_id ];
+
+			if ( ! is_a( $rate, 'WC_Shipping_Rate' ) ) {
+				continue;
+			}
+
+			$shipping_including_vat += (float) $rate->get_cost() + array_sum( $rate->get_taxes() );
+		}
+
+		return $shipping_including_vat;
 	}
 
 	/**
@@ -277,43 +355,227 @@ class WCPRSV_Plugin {
 	 * @return string
 	 */
 	private function get_breakdown_html( array $breakdown ) {
+		$display_lines      = $this->get_display_lines( $breakdown['lines'], $breakdown );
+		$goods_total        = $this->sum_display_column( $display_lines, 'goods_amount_ex_vat' );
+		$shipping_total     = $this->sum_display_column( $display_lines, 'shipping_excluding_vat' );
+		$goods_vat_total    = $this->sum_display_column( $display_lines, 'goods_vat' );
+		$shipping_vat_total = $this->sum_display_column( $display_lines, 'shipping_vat' );
+		$total_excluding    = $this->round_money( $goods_total + $shipping_total );
+		$total_vat          = $this->round_money( $goods_vat_total + $shipping_vat_total );
+		$total_including    = $this->round_money( $total_excluding + $total_vat );
+
 		ob_start();
 		?>
 		<div class="wcprsv-breakdown" data-wcprsv-breakdown="1">
-			<strong><?php echo esc_html__( 'BTW-berekening verzendkosten', 'wc-pro-rata-shipping-vat' ); ?></strong>
-			<table class="wcprsv-breakdown__table" style="width:100%; margin-top:.5em;">
-				<thead>
-					<tr>
-						<th style="text-align:left;"><?php echo esc_html__( 'BTW', 'wc-pro-rata-shipping-vat' ); ?></th>
-						<th style="text-align:right;"><?php echo esc_html__( 'Goederen ex. BTW', 'wc-pro-rata-shipping-vat' ); ?></th>
-						<th style="text-align:right;"><?php echo esc_html__( 'Verzending ex. BTW', 'wc-pro-rata-shipping-vat' ); ?></th>
-						<th style="text-align:right;"><?php echo esc_html__( 'BTW verzending', 'wc-pro-rata-shipping-vat' ); ?></th>
-						<th style="text-align:right;"><?php echo esc_html__( 'Verzending incl. BTW', 'wc-pro-rata-shipping-vat' ); ?></th>
-					</tr>
-				</thead>
-				<tbody>
-					<?php foreach ( $breakdown['lines'] as $line ) : ?>
-						<tr>
-							<td><?php echo esc_html( $this->format_vat_rate( $line['vat_rate'] ) ); ?></td>
-							<td style="text-align:right;"><?php echo wp_kses_post( wc_price( $line['goods_amount_ex_vat'] ) ); ?></td>
-							<td style="text-align:right;"><?php echo wp_kses_post( wc_price( $line['shipping_excluding_vat'] ) ); ?></td>
-							<td style="text-align:right;"><?php echo wp_kses_post( wc_price( $line['shipping_vat'] ) ); ?></td>
-							<td style="text-align:right;"><?php echo wp_kses_post( wc_price( $line['shipping_including_vat'] ) ); ?></td>
-						</tr>
+			<div class="wcprsv-breakdown__title"><?php echo esc_html__( 'BTW-specificatie', 'wc-pro-rata-shipping-vat' ); ?></div>
+
+			<div class="wcprsv-summary" role="table" aria-label="<?php echo esc_attr__( 'BTW-specificatie', 'wc-pro-rata-shipping-vat' ); ?>">
+				<div class="wcprsv-summary__row wcprsv-summary__row--head" role="row">
+					<div role="columnheader"><?php echo esc_html__( 'Tarief', 'wc-pro-rata-shipping-vat' ); ?></div>
+					<div role="columnheader"><?php echo esc_html__( 'Goederen', 'wc-pro-rata-shipping-vat' ); ?></div>
+					<div role="columnheader"><?php echo esc_html__( 'Verzending', 'wc-pro-rata-shipping-vat' ); ?></div>
+					<div role="columnheader"><?php echo esc_html__( 'BTW', 'wc-pro-rata-shipping-vat' ); ?></div>
+				</div>
+				<?php foreach ( $display_lines as $line ) : ?>
+					<div class="wcprsv-summary__row" role="row">
+						<div role="cell"><?php echo esc_html( $this->format_vat_rate( $line['vat_rate'] ) ); ?></div>
+						<div role="cell"><?php echo wp_kses_post( wc_price( $line['goods_amount_ex_vat'] ) ); ?></div>
+						<div role="cell"><?php echo wp_kses_post( wc_price( $line['shipping_excluding_vat'] ) ); ?></div>
+						<div role="cell"><?php echo wp_kses_post( wc_price( $line['total_vat'] ) ); ?></div>
+					</div>
+				<?php endforeach; ?>
+			</div>
+
+			<div class="wcprsv-totals">
+				<div class="wcprsv-totals__row">
+					<span><?php echo esc_html__( 'Totaal excl. BTW', 'wc-pro-rata-shipping-vat' ); ?></span>
+					<strong><?php echo wp_kses_post( wc_price( $total_excluding ) ); ?></strong>
+				</div>
+				<div class="wcprsv-totals__row">
+					<span><?php echo esc_html__( 'Totaal BTW', 'wc-pro-rata-shipping-vat' ); ?></span>
+					<strong><?php echo wp_kses_post( wc_price( $total_vat ) ); ?></strong>
+				</div>
+				<div class="wcprsv-totals__row wcprsv-totals__row--grand">
+					<span><?php echo esc_html__( 'Totaal incl. BTW', 'wc-pro-rata-shipping-vat' ); ?></span>
+					<strong><?php echo wp_kses_post( wc_price( $total_including ) ); ?></strong>
+				</div>
+			</div>
+
+			<details class="wcprsv-details">
+				<summary><?php echo esc_html__( 'Toon berekening', 'wc-pro-rata-shipping-vat' ); ?></summary>
+				<div class="wcprsv-detail-lines">
+					<?php foreach ( $display_lines as $line ) : ?>
+						<div class="wcprsv-detail-line">
+							<div class="wcprsv-detail-line__title"><?php echo esc_html( $this->format_vat_rate( $line['vat_rate'] ) ); ?></div>
+							<div><span><?php echo esc_html__( 'Goederen excl. BTW', 'wc-pro-rata-shipping-vat' ); ?></span><strong><?php echo wp_kses_post( wc_price( $line['goods_amount_ex_vat'] ) ); ?></strong></div>
+							<div><span><?php echo esc_html__( 'Verzending excl. BTW', 'wc-pro-rata-shipping-vat' ); ?></span><strong><?php echo wp_kses_post( wc_price( $line['shipping_excluding_vat'] ) ); ?></strong></div>
+							<div><span><?php echo esc_html__( 'BTW goederen', 'wc-pro-rata-shipping-vat' ); ?></span><strong><?php echo wp_kses_post( wc_price( $line['goods_vat'] ) ); ?></strong></div>
+							<div><span><?php echo esc_html__( 'BTW verzending', 'wc-pro-rata-shipping-vat' ); ?></span><strong><?php echo wp_kses_post( wc_price( $line['shipping_vat'] ) ); ?></strong></div>
+							<div><span><?php echo esc_html__( 'Incl. BTW', 'wc-pro-rata-shipping-vat' ); ?></span><strong><?php echo wp_kses_post( wc_price( $line['including_vat'] ) ); ?></strong></div>
+						</div>
 					<?php endforeach; ?>
-				</tbody>
-				<tfoot>
-					<tr>
-						<th scope="row" colspan="2" style="text-align:left;"><?php echo esc_html__( 'Totaal verzendkosten', 'wc-pro-rata-shipping-vat' ); ?></th>
-						<td style="text-align:right;"><?php echo wp_kses_post( wc_price( $breakdown['shipping_excluding_vat'] ) ); ?></td>
-						<td style="text-align:right;"><?php echo wp_kses_post( wc_price( array_sum( $breakdown['taxes'] ) ) ); ?></td>
-						<td style="text-align:right;"><?php echo wp_kses_post( wc_price( $breakdown['shipping_including_vat'] ) ); ?></td>
-					</tr>
-				</tfoot>
-			</table>
+				</div>
+			</details>
 		</div>
 		<?php
 		return ob_get_clean();
+	}
+
+	/**
+	 * Sum goods VAT for display lines.
+	 *
+	 * @param array $lines Breakdown lines.
+	 * @return float
+	 */
+	private function sum_goods_vat( array $lines ) {
+		$total = 0.0;
+
+		foreach ( $lines as $line ) {
+			$total += (float) $line['goods_amount_ex_vat'] * (float) $line['vat_rate'];
+		}
+
+		return $total;
+	}
+
+	/**
+	 * Build display lines using Excel-style per-cell rounding.
+	 *
+	 * @param array $lines Raw breakdown lines.
+	 * @param array $breakdown Full breakdown totals.
+	 * @return array
+	 */
+	private function get_display_lines( array $lines, array $breakdown ) {
+		$display_lines = array();
+		$largest_key   = null;
+		$largest_total = -1.0;
+
+		foreach ( $lines as $key => $line ) {
+			$goods_amount = $this->round_money( $line['goods_amount_ex_vat'] );
+			$shipping_ex  = $this->round_money( $line['shipping_excluding_vat'] );
+			$goods_vat    = $this->round_money( $goods_amount * $line['vat_rate'] );
+			$shipping_vat = $this->round_money( $line['shipping_vat'] );
+			$total_vat    = $this->round_money( $goods_vat + $shipping_vat );
+			$including    = $this->round_money( $goods_amount + $shipping_ex + $total_vat );
+
+			$display_lines[ $key ] = array(
+				'vat_rate'               => (float) $line['vat_rate'],
+				'goods_amount_ex_vat'    => $goods_amount,
+				'shipping_excluding_vat' => $shipping_ex,
+				'goods_vat'              => $goods_vat,
+				'shipping_vat'           => $shipping_vat,
+				'total_vat'              => $total_vat,
+				'including_vat'          => $including,
+			);
+
+			if ( $including > $largest_total ) {
+				$largest_key   = $key;
+				$largest_total = $including;
+			}
+		}
+
+		$this->reconcile_display_lines( $display_lines, $breakdown, $largest_key );
+
+		return $display_lines;
+	}
+
+	/**
+	 * Reconcile rounded display cells with WooCommerce-facing totals.
+	 *
+	 * @param array       $display_lines Rounded display lines.
+	 * @param array       $breakdown Full breakdown totals.
+	 * @param string|null $largest_key Line key that receives rounding deltas.
+	 * @return void
+	 */
+	private function reconcile_display_lines( array &$display_lines, array $breakdown, $largest_key ) {
+		if ( empty( $display_lines ) || null === $largest_key || ! isset( $display_lines[ $largest_key ] ) ) {
+			return;
+		}
+
+		$cart_total_including     = $this->get_cart_total_including_vat();
+		$target_shipping_ex       = $this->round_money( $breakdown['shipping_excluding_vat'] );
+		$target_shipping_vat      = $this->round_money( $breakdown['shipping_including_vat'] - $breakdown['shipping_excluding_vat'] );
+		$target_shipping_incl     = $this->round_money( $breakdown['shipping_including_vat'] );
+		$current_shipping_ex      = $this->sum_display_column( $display_lines, 'shipping_excluding_vat' );
+		$current_shipping_vat     = $this->sum_display_column( $display_lines, 'shipping_vat' );
+		$shipping_incl_difference = $this->round_money( $target_shipping_incl - $current_shipping_ex - $current_shipping_vat );
+
+		$display_lines[ $largest_key ]['shipping_vat'] = $this->round_money(
+			$display_lines[ $largest_key ]['shipping_vat'] + $shipping_incl_difference
+		);
+
+		$shipping_ex_difference = $this->round_money( $target_shipping_ex - $current_shipping_ex );
+
+		if ( 0.0 !== $shipping_ex_difference ) {
+			$display_lines[ $largest_key ]['shipping_excluding_vat'] = $this->round_money(
+				$display_lines[ $largest_key ]['shipping_excluding_vat'] + $shipping_ex_difference
+			);
+		}
+
+		$shipping_vat_difference = $this->round_money( $target_shipping_vat - $this->sum_display_column( $display_lines, 'shipping_vat' ) );
+
+		if ( 0.0 !== $shipping_vat_difference ) {
+			$display_lines[ $largest_key ]['shipping_vat'] = $this->round_money(
+				$display_lines[ $largest_key ]['shipping_vat'] + $shipping_vat_difference
+			);
+		}
+
+		$target_goods_total = $cart_total_including > 0 ? $this->round_money( $cart_total_including - $target_shipping_incl ) : $this->sum_display_column( $display_lines, 'goods_amount_ex_vat' ) + $this->sum_display_column( $display_lines, 'goods_vat' );
+		$current_goods_total = $this->round_money(
+			$this->sum_display_column( $display_lines, 'goods_amount_ex_vat' ) + $this->sum_display_column( $display_lines, 'goods_vat' )
+		);
+		$goods_vat_difference = $this->round_money( $target_goods_total - $current_goods_total );
+
+		if ( 0.0 !== $goods_vat_difference ) {
+			$display_lines[ $largest_key ]['goods_vat'] = $this->round_money(
+				$display_lines[ $largest_key ]['goods_vat'] + $goods_vat_difference
+			);
+		}
+
+		foreach ( $display_lines as &$line ) {
+			$line['total_vat']     = $this->round_money( $line['goods_vat'] + $line['shipping_vat'] );
+			$line['including_vat'] = $this->round_money( $line['goods_amount_ex_vat'] + $line['shipping_excluding_vat'] + $line['total_vat'] );
+		}
+		unset( $line );
+	}
+
+	/**
+	 * Sum a rounded display column.
+	 *
+	 * @param array  $lines Display lines.
+	 * @param string $column Column name.
+	 * @return float
+	 */
+	private function sum_display_column( array $lines, $column ) {
+		$total = 0.0;
+
+		foreach ( $lines as $line ) {
+			$total += (float) $line[ $column ];
+		}
+
+		return $this->round_money( $total );
+	}
+
+	/**
+	 * Round a monetary display value like Excel ROUND(cell, 2).
+	 *
+	 * @param float $value Raw value.
+	 * @return float
+	 */
+	private function round_money( $value ) {
+		return round( (float) $value, wc_get_price_decimals() );
+	}
+
+	/**
+	 * Get the current cart total including VAT.
+	 *
+	 * @return float
+	 */
+	private function get_cart_total_including_vat() {
+		if ( ! WC()->cart ) {
+			return 0.0;
+		}
+
+		return $this->round_money( (float) WC()->cart->get_total( 'edit' ) );
 	}
 
 	/**
