@@ -15,6 +15,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 class WCPRSV_Settings {
 	const OPTION_ENABLED            = 'wcprsv_enabled';
 	const OPTION_REFERENCE_VAT_RATE = 'wcprsv_reference_vat_rate';
+	const OPTION_DEBUG              = 'wcprsv_debug';
 
 	/**
 	 * Register settings hooks.
@@ -47,6 +48,15 @@ class WCPRSV_Settings {
 		}
 
 		return $rate / 100;
+	}
+
+	/**
+	 * Whether debug output should be emitted.
+	 *
+	 * @return bool
+	 */
+	public function is_debug_enabled() {
+		return 'yes' === get_option( self::OPTION_DEBUG, 'no' );
 	}
 
 	/**
@@ -87,6 +97,13 @@ class WCPRSV_Settings {
 				),
 				'desc'              => __( 'Percentage used to convert existing shipping costs from excluding VAT to including VAT. Use 9 when shipping is currently entered as excluding 9% VAT.', 'wc-pro-rata-shipping-vat' ),
 				'desc_tip'          => true,
+			),
+			array(
+				'title'   => __( 'Debug', 'wc-pro-rata-shipping-vat' ),
+				'id'      => self::OPTION_DEBUG,
+				'default' => 'no',
+				'type'    => 'checkbox',
+				'desc'    => __( 'Log pro-rata shipping VAT calculations to the browser console and WooCommerce logs.', 'wc-pro-rata-shipping-vat' ),
 			),
 			array(
 				'type' => 'sectionend',

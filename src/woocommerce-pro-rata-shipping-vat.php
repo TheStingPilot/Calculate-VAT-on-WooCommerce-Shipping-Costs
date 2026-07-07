@@ -3,7 +3,7 @@
  * Plugin Name: WooCommerce Pro-rata Shipping VAT
  * Plugin URI: https://github.com/TheStingPilot/woocommerce-pro-rata-shipping-vat
  * Description: Calculates Dutch pro-rata VAT on WooCommerce shipping costs for carts with mixed VAT rates.
- * Version: 0.1.6
+ * Version: 0.1.19
  * Author: TheStingPilot, Codex
  * Author URI: https://github.com/TheStingPilot
  * Text Domain: wc-pro-rata-shipping-vat
@@ -20,7 +20,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'WCPRSV_VERSION', '0.1.6' );
+define( 'WCPRSV_VERSION', '0.1.19' );
 define( 'WCPRSV_FILE', __FILE__ );
 define( 'WCPRSV_PATH', plugin_dir_path( __FILE__ ) );
 

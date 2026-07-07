@@ -76,6 +76,12 @@
 				return response.json();
 			} )
 			.then( function ( data ) {
+				if ( data && data.debug && window.console ) {
+					window.console.groupCollapsed( 'WooCommerce Pro-rata Shipping VAT' );
+					window.console.log( data.debug );
+					window.console.groupEnd();
+				}
+
 				if ( data && data.has_breakdown && data.html ) {
 					render( data.html );
 				}

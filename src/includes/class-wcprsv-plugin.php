@@ -64,10 +64,17 @@ class WCPRSV_Plugin {
 		$this->settings->init();
 
 		add_filter( 'woocommerce_package_rates', array( $this, 'recalculate_package_rates' ), 100, 2 );
+		add_action( 'woocommerce_checkout_create_order_shipping_item', array( $this, 'set_order_shipping_item_taxes' ), 20, 4 );
+		add_action( 'woocommerce_checkout_create_order', array( $this, 'store_order_breakdown' ), 20, 2 );
+		add_action( 'woocommerce_store_api_checkout_order_processed', array( $this, 'finalize_store_api_order' ), 20, 1 );
+		add_action( 'woocommerce_checkout_order_processed', array( $this, 'finalize_classic_order' ), 20, 3 );
 		add_action( 'woocommerce_cart_totals_after_order_total', array( $this, 'render_classic_breakdown' ) );
 		add_action( 'woocommerce_review_order_after_order_total', array( $this, 'render_classic_breakdown' ) );
+		add_action( 'woocommerce_order_details_after_order_table', array( $this, 'render_order_breakdown' ) );
+		add_action( 'wpo_wcpdf_after_order_details', array( $this, 'render_pdf_invoice_breakdown' ), 10, 2 );
 		add_action( 'wp_enqueue_scripts', array( $this, 'enqueue_frontend_assets' ) );
 		add_action( 'rest_api_init', array( $this, 'register_storefront_endpoint' ) );
+		add_action( 'admin_menu', array( $this, 'register_admin_menu' ) );
 	}
 
 	/**
@@ -110,14 +117,706 @@ class WCPRSV_Plugin {
 				continue;
 			}
 
+			$this->debug_log(
+				'package_rate_calculated',
+				array(
+					'rate_id'                => $rate_id,
+					'original_rate_cost'     => $cost,
+					'reference_vat_rate'     => $this->settings->get_reference_vat_rate(),
+					'goods_by_tax_rate'      => $goods_by_tax_rate,
+					'calculated_breakdown'   => $result,
+				)
+			);
+
 			$rate->set_cost( wc_format_decimal( $result['shipping_excluding_vat'], wc_get_price_decimals() ) );
 			$rate->set_taxes( $result['taxes'] );
 			$rate->add_meta_data( '_wcprsv_breakdown', $result );
+			$this->store_session_breakdown( $rate_id, $result );
 
 			$rates[ $rate_id ] = $rate;
 		}
 
 		return $rates;
+	}
+
+	/**
+	 * Persist the pro-rata shipping totals on the order shipping item.
+	 *
+	 * @param WC_Order_Item_Shipping $item Shipping item.
+	 * @param string                 $package_key Package key.
+	 * @param array                  $package Shipping package.
+	 * @param WC_Order               $order Order object.
+	 * @return void
+	 */
+	public function set_order_shipping_item_taxes( $item, $package_key, $package, $order ) {
+		if ( ! $this->settings->is_enabled() || ! wc_tax_enabled() || ! is_a( $item, 'WC_Order_Item_Shipping' ) ) {
+			return;
+		}
+
+		$breakdown = $this->get_package_shipping_breakdown( $package_key, $package );
+
+		if ( empty( $breakdown['lines'] ) ) {
+			$breakdown = $this->calculate_order_shipping_item_breakdown( $item, $package );
+		}
+
+		if ( empty( $breakdown['lines'] ) ) {
+			$this->debug_log(
+				'checkout_create_order_shipping_item_no_breakdown',
+				array(
+					'package_key'     => $package_key,
+					'item_total'      => $item->get_total(),
+					'item_taxes'      => $item->get_taxes(),
+					'package_summary' => $this->summarize_package( $package ),
+				)
+			);
+			return;
+		}
+
+		$this->debug_log(
+			'checkout_create_order_shipping_item_apply',
+			array(
+				'package_key'       => $package_key,
+				'before_item_total' => $item->get_total(),
+				'before_item_taxes' => $item->get_taxes(),
+				'breakdown'         => $breakdown,
+			)
+		);
+
+		$item->set_total( wc_format_decimal( $breakdown['shipping_excluding_vat'], wc_get_price_decimals() ) );
+		$this->set_shipping_item_tax_data( $item, $breakdown['taxes'] );
+		$item->update_meta_data( '_wcprsv_breakdown', $breakdown );
+
+		$this->debug_log(
+			'checkout_create_order_shipping_item_after',
+			array(
+				'after_item_total' => $item->get_total(),
+				'after_item_taxes' => $item->get_taxes(),
+			)
+		);
+	}
+
+	/**
+	 * Calculate the breakdown directly while WooCommerce creates the order shipping item.
+	 *
+	 * @param WC_Order_Item_Shipping $item Shipping item.
+	 * @param array                  $package Shipping package.
+	 * @return array
+	 */
+	private function calculate_order_shipping_item_breakdown( $item, array $package ) {
+		$goods_by_tax_rate = $this->get_goods_by_tax_rate( $package );
+
+		if ( empty( $goods_by_tax_rate ) ) {
+			return array();
+		}
+
+		$item_total = (float) $item->get_total();
+		$item_taxes = $item->get_taxes();
+		$item_tax_total = 0.0;
+
+		if ( ! empty( $item_taxes['total'] ) && is_array( $item_taxes['total'] ) ) {
+			$item_tax_total = array_sum( array_map( 'floatval', $item_taxes['total'] ) );
+		}
+
+		if ( $item_tax_total > 0 ) {
+			$result = $this->calculator->calculate_from_including_vat(
+				$item_total + $item_tax_total,
+				$goods_by_tax_rate,
+				wc_get_price_decimals()
+			);
+
+			$this->debug_log(
+				'order_shipping_item_breakdown_from_including',
+				array(
+					'item_total'        => $item_total,
+					'item_tax_total'    => $item_tax_total,
+					'goods_by_tax_rate' => $goods_by_tax_rate,
+					'breakdown'         => $result,
+				)
+			);
+
+			return $result;
+		}
+
+		$result = $this->calculator->calculate(
+			$item_total,
+			$this->settings->get_reference_vat_rate(),
+			$goods_by_tax_rate,
+			wc_get_price_decimals()
+		);
+
+		$this->debug_log(
+			'order_shipping_item_breakdown_from_reference_rate',
+			array(
+				'item_total'          => $item_total,
+				'reference_vat_rate'  => $this->settings->get_reference_vat_rate(),
+				'goods_by_tax_rate'   => $goods_by_tax_rate,
+				'breakdown'           => $result,
+			)
+		);
+
+		return $result;
+	}
+
+	/**
+	 * Store the final pro-rata breakdown on the order.
+	 *
+	 * @param WC_Order $order Order object.
+	 * @param array    $data Checkout data.
+	 * @return void
+	 */
+	public function store_order_breakdown( $order, $data ) {
+		if ( ! $this->settings->is_enabled() || ! wc_tax_enabled() || ! is_a( $order, 'WC_Order' ) ) {
+			return;
+		}
+
+		$breakdown = $this->get_breakdown_from_order_shipping_items( $order );
+
+		if ( empty( $breakdown['lines'] ) ) {
+			$breakdown = $this->get_selected_shipping_breakdown();
+		}
+
+		if ( empty( $breakdown['lines'] ) ) {
+			return;
+		}
+
+		$this->debug_log(
+			'checkout_create_order_store_breakdown',
+			array(
+				'order_id'          => $order->get_id(),
+				'order_total_before' => $order->get_total(),
+				'shipping_total_before' => $order->get_shipping_total(),
+				'shipping_tax_before' => $order->get_shipping_tax(),
+				'breakdown'         => $breakdown,
+			)
+		);
+
+		$this->apply_order_tax_lines( $order, $breakdown );
+		$order->update_meta_data( '_wcprsv_breakdown', $breakdown );
+	}
+
+	/**
+	 * Finalize Store API / Checkout Blocks orders after WooCommerce has built the order.
+	 *
+	 * @param WC_Order $order Order object.
+	 * @return void
+	 */
+	public function finalize_store_api_order( $order ) {
+		$this->finalize_order_shipping_breakdown( $order );
+	}
+
+	/**
+	 * Finalize classic checkout orders after WooCommerce has built the order.
+	 *
+	 * @param int      $order_id Order ID.
+	 * @param array    $posted_data Posted checkout data.
+	 * @param WC_Order $order Order object.
+	 * @return void
+	 */
+	public function finalize_classic_order( $order_id, $posted_data, $order ) {
+		$this->finalize_order_shipping_breakdown( $order );
+	}
+
+	/**
+	 * Apply the cart pro-rata shipping breakdown to the completed order.
+	 *
+	 * @param WC_Order $order Order object.
+	 * @return void
+	 */
+	private function finalize_order_shipping_breakdown( $order ) {
+		if ( ! $this->settings->is_enabled() || ! wc_tax_enabled() || ! is_a( $order, 'WC_Order' ) ) {
+			return;
+		}
+
+		$breakdown = $this->get_selected_shipping_breakdown();
+
+		if ( empty( $breakdown['lines'] ) ) {
+			$breakdown = $this->get_breakdown_from_order_shipping_items( $order );
+		}
+
+		if ( empty( $breakdown['lines'] ) ) {
+			$this->debug_log(
+				'finalize_order_no_breakdown',
+				array(
+					'order_id'       => $order->get_id(),
+					'order_total'    => $order->get_total(),
+					'shipping_total' => $order->get_shipping_total(),
+					'shipping_tax'   => $order->get_shipping_tax(),
+				)
+			);
+			return;
+		}
+
+		$this->debug_log(
+			'finalize_order_before_apply',
+			array(
+				'order_id'              => $order->get_id(),
+				'order_total_before'    => $order->get_total(),
+				'shipping_total_before' => $order->get_shipping_total(),
+				'shipping_tax_before'   => $order->get_shipping_tax(),
+				'breakdown'             => $breakdown,
+			)
+		);
+
+		$this->apply_breakdown_to_order_shipping_items( $order, $breakdown );
+		$this->apply_order_tax_lines( $order, $breakdown );
+		$order->update_meta_data( '_wcprsv_breakdown', $breakdown );
+		$order->calculate_totals( false );
+		$this->reconcile_order_total( $order, $breakdown );
+		$order->save();
+
+		$this->debug_log(
+			'finalize_order_after_apply',
+			array(
+				'order_id'             => $order->get_id(),
+				'order_total_after'    => $order->get_total(),
+				'shipping_total_after' => $order->get_shipping_total(),
+				'shipping_tax_after'   => $order->get_shipping_tax(),
+				'tax_totals_after'     => $this->summarize_order_tax_items( $order ),
+			)
+		);
+	}
+
+	/**
+	 * Apply the pro-rata breakdown to the order's shipping items.
+	 *
+	 * @param WC_Order $order Order object.
+	 * @param array    $breakdown Pro-rata breakdown.
+	 * @return void
+	 */
+	private function apply_breakdown_to_order_shipping_items( $order, array $breakdown ) {
+		$shipping_items = $order->get_items( 'shipping' );
+
+		if ( empty( $shipping_items ) ) {
+			return;
+		}
+
+		$first = true;
+
+		foreach ( $shipping_items as $item ) {
+			if ( $first ) {
+				$item->set_total( wc_format_decimal( $breakdown['shipping_excluding_vat'], wc_get_price_decimals() ) );
+				$this->set_shipping_item_tax_data( $item, $breakdown['taxes'] );
+				$item->update_meta_data( '_wcprsv_breakdown', $breakdown );
+				$item->save();
+				$first = false;
+				continue;
+			}
+
+			$item->set_total( 0 );
+			$this->set_shipping_item_tax_data( $item, array() );
+			$item->save();
+		}
+	}
+
+	/**
+	 * Set complete shipping tax data on an order shipping item.
+	 *
+	 * @param WC_Order_Item_Shipping $item Shipping item.
+	 * @param array                  $taxes Taxes keyed by rate ID.
+	 * @return void
+	 */
+	private function set_shipping_item_tax_data( $item, array $taxes ) {
+		$taxes = array_map(
+			static function ( $amount ) {
+				return wc_format_decimal( $amount, wc_get_price_decimals() );
+			},
+			$taxes
+		);
+
+		$item->set_taxes(
+			array(
+				'total'    => $taxes,
+				'subtotal' => $taxes,
+			)
+		);
+	}
+
+	/**
+	 * Reconcile the order total after WooCommerce has recalculated totals.
+	 *
+	 * @param WC_Order $order Order object.
+	 * @param array    $breakdown Pro-rata breakdown.
+	 * @return void
+	 */
+	private function reconcile_order_total( $order, array $breakdown ) {
+		$shipping_tax_total = $this->round_money( array_sum( array_map( 'floatval', $breakdown['taxes'] ) ) );
+
+		if ( method_exists( $order, 'set_shipping_tax' ) ) {
+			$order->set_shipping_tax( $shipping_tax_total );
+		}
+
+		$expected_total = $this->calculate_expected_order_total( $order, $breakdown );
+		$current_total = $this->round_money( $order->get_total() );
+
+		if ( $expected_total !== $current_total ) {
+			$this->debug_log(
+				'reconcile_order_total',
+				array(
+					'order_id'       => $order->get_id(),
+					'current_total'  => $current_total,
+					'expected_total' => $expected_total,
+					'order_subtotal' => $order->get_subtotal(),
+					'cart_tax'       => $order->get_cart_tax(),
+					'shipping_ex'    => $breakdown['shipping_excluding_vat'],
+					'shipping_tax'   => $shipping_tax_total,
+					'shipping_taxes' => $breakdown['taxes'],
+				)
+			);
+			$order->set_total( $expected_total );
+		}
+	}
+
+	/**
+	 * Calculate the order total that matches a pro-rata shipping breakdown.
+	 *
+	 * @param WC_Order $order Order object.
+	 * @param array    $breakdown Pro-rata breakdown.
+	 * @return float
+	 */
+	private function calculate_expected_order_total( $order, array $breakdown ) {
+		$shipping_tax_total = $this->round_money( array_sum( array_map( 'floatval', $breakdown['taxes'] ) ) );
+		$fee_total          = method_exists( $order, 'get_total_fees' ) ? (float) $order->get_total_fees() : 0.0;
+		$fee_tax            = method_exists( $order, 'get_fee_tax' ) ? (float) $order->get_fee_tax() : 0.0;
+
+		return $this->round_money(
+			(float) $order->get_subtotal()
+			- (float) $order->get_total_discount()
+			+ (float) $order->get_cart_tax()
+			+ (float) $breakdown['shipping_excluding_vat']
+			+ $shipping_tax_total
+			+ $fee_total
+			+ $fee_tax
+		);
+	}
+
+	/**
+	 * Register the WooCommerce maintenance page.
+	 *
+	 * @return void
+	 */
+	public function register_admin_menu() {
+		add_submenu_page(
+			'woocommerce',
+			__( 'Pro-rata verzend-BTW', 'wc-pro-rata-shipping-vat' ),
+			__( 'Pro-rata verzend-BTW', 'wc-pro-rata-shipping-vat' ),
+			'manage_woocommerce',
+			'wcprsv-maintenance',
+			array( $this, 'render_maintenance_page' )
+		);
+	}
+
+	/**
+	 * Render the order maintenance page.
+	 *
+	 * @return void
+	 */
+	public function render_maintenance_page() {
+		if ( ! current_user_can( 'manage_woocommerce' ) ) {
+			wp_die( esc_html__( 'You do not have permission to access this page.', 'wc-pro-rata-shipping-vat' ) );
+		}
+
+		$results = array();
+		$notice  = '';
+		$ids     = '';
+		$action  = isset( $_POST['wcprsv_action'] ) ? sanitize_key( wp_unslash( $_POST['wcprsv_action'] ) ) : 'analyze';
+
+		if ( isset( $_POST['wcprsv_order_ids'] ) ) {
+			check_admin_referer( 'wcprsv_maintenance' );
+
+			$ids       = sanitize_textarea_field( wp_unslash( $_POST['wcprsv_order_ids'] ) );
+			$order_ids = $this->parse_order_ids( $ids );
+
+			foreach ( $order_ids as $order_id ) {
+				$order = wc_get_order( $order_id );
+
+				if ( ! $order ) {
+					$results[] = array(
+						'order_id' => $order_id,
+						'status'   => __( 'Niet gevonden', 'wc-pro-rata-shipping-vat' ),
+					);
+					continue;
+				}
+
+				$analysis = $this->analyze_order_recalculation( $order );
+
+				if ( 'recalculate' === $action && empty( $analysis['error'] ) ) {
+					$analysis = $this->recalculate_existing_order( $order, $analysis );
+				}
+
+				$results[] = $analysis;
+			}
+
+			$notice = 'recalculate' === $action
+				? __( 'Herberekening afgerond.', 'wc-pro-rata-shipping-vat' )
+				: __( 'Analyse afgerond.', 'wc-pro-rata-shipping-vat' );
+		}
+
+		?>
+		<div class="wrap">
+			<h1><?php echo esc_html__( 'Pro-rata verzend-BTW onderhoud', 'wc-pro-rata-shipping-vat' ); ?></h1>
+			<?php if ( $notice ) : ?>
+				<div class="notice notice-success"><p><?php echo esc_html( $notice ); ?></p></div>
+			<?php endif; ?>
+			<p><?php echo esc_html__( 'Analyseer of herbereken bestaande WooCommerce orders. De boekhouding wordt niet opnieuw geëxporteerd; deze actie past alleen de WooCommerce orderdata aan.', 'wc-pro-rata-shipping-vat' ); ?></p>
+			<form method="post">
+				<?php wp_nonce_field( 'wcprsv_maintenance' ); ?>
+				<table class="form-table" role="presentation">
+					<tr>
+						<th scope="row"><label for="wcprsv_order_ids"><?php echo esc_html__( 'Ordernummers', 'wc-pro-rata-shipping-vat' ); ?></label></th>
+						<td>
+							<textarea id="wcprsv_order_ids" name="wcprsv_order_ids" rows="4" class="large-text" placeholder="33210, 33211"><?php echo esc_textarea( $ids ); ?></textarea>
+							<p class="description"><?php echo esc_html__( 'Gebruik komma’s, spaties of nieuwe regels om meerdere orders op te geven.', 'wc-pro-rata-shipping-vat' ); ?></p>
+						</td>
+					</tr>
+				</table>
+				<p class="submit">
+					<button class="button button-secondary" type="submit" name="wcprsv_action" value="analyze"><?php echo esc_html__( 'Analyseer', 'wc-pro-rata-shipping-vat' ); ?></button>
+					<button class="button button-primary" type="submit" name="wcprsv_action" value="recalculate" onclick="return confirm('<?php echo esc_js( __( 'Weet je zeker dat je de geselecteerde orders wilt herberekenen?', 'wc-pro-rata-shipping-vat' ) ); ?>');"><?php echo esc_html__( 'Herbereken orders', 'wc-pro-rata-shipping-vat' ); ?></button>
+				</p>
+			</form>
+			<?php $this->render_maintenance_results( $results ); ?>
+		</div>
+		<?php
+	}
+
+	/**
+	 * Parse order IDs from textarea input.
+	 *
+	 * @param string $input Raw order ID list.
+	 * @return array
+	 */
+	private function parse_order_ids( $input ) {
+		$ids = preg_split( '/[\s,;]+/', (string) $input );
+		$ids = array_filter( array_map( 'absint', $ids ) );
+
+		return array_values( array_unique( $ids ) );
+	}
+
+	/**
+	 * Analyze an existing order without changing it.
+	 *
+	 * @param WC_Order $order Order object.
+	 * @return array
+	 */
+	private function analyze_order_recalculation( $order ) {
+		$goods_by_tax_rate = $this->get_order_goods_by_tax_rate( $order );
+		$shipping_source   = $this->get_order_maintenance_shipping_including_vat( $order );
+		$shipping_incl     = $shipping_source['amount'];
+
+		$result = array(
+			'order_id'             => $order->get_id(),
+			'order_number'         => $order->get_order_number(),
+			'date'                 => $order->get_date_created() ? $order->get_date_created()->date_i18n( 'Y-m-d H:i' ) : '',
+			'current_total'        => $this->round_money( $order->get_total() ),
+			'current_shipping_ex'  => $this->round_money( $order->get_shipping_total() ),
+			'current_shipping_tax' => $this->round_money( $order->get_shipping_tax() ),
+			'shipping_source'      => $shipping_source['source'],
+			'status'               => __( 'OK', 'wc-pro-rata-shipping-vat' ),
+		);
+
+		if ( empty( $goods_by_tax_rate ) || $shipping_incl <= 0 ) {
+			$result['status'] = __( 'Niet ondersteund', 'wc-pro-rata-shipping-vat' );
+			$result['error']  = __( 'Geen belastbare goederen of verzendkosten gevonden.', 'wc-pro-rata-shipping-vat' );
+			return $result;
+		}
+
+		$breakdown = $this->calculator->calculate_from_including_vat( $shipping_incl, $goods_by_tax_rate, wc_get_price_decimals() );
+
+		if ( empty( $breakdown['lines'] ) ) {
+			$result['status'] = __( 'Niet ondersteund', 'wc-pro-rata-shipping-vat' );
+			$result['error']  = __( 'Geen BTW-specificatie te berekenen.', 'wc-pro-rata-shipping-vat' );
+			return $result;
+		}
+
+		$expected_total         = $this->calculate_expected_order_total( $order, $breakdown );
+		$new_shipping_tax       = $this->round_money( array_sum( array_map( 'floatval', $breakdown['taxes'] ) ) );
+		$result['new_total']    = $expected_total;
+		$result['new_shipping_ex']  = $this->round_money( $breakdown['shipping_excluding_vat'] );
+		$result['new_shipping_tax'] = $new_shipping_tax;
+		$result['difference']   = $this->round_money( $expected_total - (float) $order->get_total() );
+		$result['breakdown']    = $breakdown;
+		$result['status']       = 0.0 === $result['difference'] && $result['current_shipping_tax'] === $new_shipping_tax ? __( 'OK', 'wc-pro-rata-shipping-vat' ) : __( 'Afwijking', 'wc-pro-rata-shipping-vat' );
+
+		return $result;
+	}
+
+	/**
+	 * Get the best inclusive shipping amount for existing order maintenance.
+	 *
+	 * @param WC_Order $order Order object.
+	 * @return array
+	 */
+	private function get_order_maintenance_shipping_including_vat( $order ) {
+		$current_amount = $this->round_money( (float) $order->get_shipping_total() + (float) $order->get_shipping_tax() );
+		$best           = array(
+			'amount' => $current_amount,
+			'source' => __( 'Huidige order', 'wc-pro-rata-shipping-vat' ),
+		);
+
+		foreach ( $this->get_stored_order_breakdown_candidates( $order ) as $candidate ) {
+			if ( empty( $candidate['breakdown']['lines'] ) || ! isset( $candidate['breakdown']['shipping_including_vat'] ) ) {
+				continue;
+			}
+
+			$amount = $this->round_money( $candidate['breakdown']['shipping_including_vat'] );
+
+			if ( $amount > $best['amount'] ) {
+				$best = array(
+					'amount' => $amount,
+					'source' => $candidate['source'],
+				);
+			}
+		}
+
+		return $best;
+	}
+
+	/**
+	 * Collect stored breakdowns that may contain the original inclusive shipping amount.
+	 *
+	 * @param WC_Order $order Order object.
+	 * @return array
+	 */
+	private function get_stored_order_breakdown_candidates( $order ) {
+		$candidates = array();
+
+		$this->add_breakdown_candidate( $candidates, $order->get_meta( '_wcprsv_breakdown' ), __( 'Order meta', 'wc-pro-rata-shipping-vat' ) );
+		$this->add_breakdown_candidate( $candidates, $order->get_meta( '_wcprsv_previous_breakdown' ), __( 'Vorige breakdown', 'wc-pro-rata-shipping-vat' ) );
+
+		$history = $order->get_meta( '_wcprsv_recalculation_history' );
+
+		if ( is_array( $history ) ) {
+			foreach ( $history as $entry ) {
+				if ( ! empty( $entry['breakdown'] ) ) {
+					$this->add_breakdown_candidate( $candidates, $entry['breakdown'], __( 'Historie', 'wc-pro-rata-shipping-vat' ) );
+				}
+			}
+		}
+
+		foreach ( $order->get_items( 'shipping' ) as $item ) {
+			$this->add_breakdown_candidate( $candidates, $item->get_meta( '_wcprsv_breakdown' ), __( 'Verzendregel meta', 'wc-pro-rata-shipping-vat' ) );
+		}
+
+		return $candidates;
+	}
+
+	/**
+	 * Add a valid breakdown candidate.
+	 *
+	 * @param array  $candidates Candidate list.
+	 * @param mixed  $breakdown Potential breakdown.
+	 * @param string $source Source label.
+	 * @return void
+	 */
+	private function add_breakdown_candidate( array &$candidates, $breakdown, $source ) {
+		if ( empty( $breakdown['lines'] ) || ! isset( $breakdown['shipping_including_vat'] ) ) {
+			return;
+		}
+
+		$candidates[] = array(
+			'breakdown' => $breakdown,
+			'source'    => $source,
+		);
+	}
+
+	/**
+	 * Recalculate an existing order and save an audit trail.
+	 *
+	 * @param WC_Order $order Order object.
+	 * @param array    $analysis Analysis result.
+	 * @return array
+	 */
+	private function recalculate_existing_order( $order, array $analysis ) {
+		$breakdown = $analysis['breakdown'];
+		$previous  = array(
+			'recalculated_at' => current_time( 'mysql' ),
+			'recalculated_by' => get_current_user_id(),
+			'order_total'     => $order->get_total(),
+			'shipping_total'  => $order->get_shipping_total(),
+			'shipping_tax'    => $order->get_shipping_tax(),
+			'tax_items'       => $this->summarize_order_tax_items( $order ),
+			'breakdown'       => $order->get_meta( '_wcprsv_breakdown' ),
+		);
+
+		$history = $order->get_meta( '_wcprsv_recalculation_history' );
+		$history = is_array( $history ) ? $history : array();
+		$history[] = $previous;
+
+		if ( count( $history ) > 10 ) {
+			$history = array_slice( $history, -10 );
+		}
+
+		$this->apply_breakdown_to_order_shipping_items( $order, $breakdown );
+		$this->apply_order_tax_lines( $order, $breakdown );
+		$order->update_meta_data( '_wcprsv_previous_breakdown', $previous['breakdown'] );
+		$order->update_meta_data( '_wcprsv_recalculation_history', $history );
+		$order->update_meta_data( '_wcprsv_recalculated_at', current_time( 'mysql' ) );
+		$order->update_meta_data( '_wcprsv_recalculated_by', get_current_user_id() );
+		$order->update_meta_data( '_wcprsv_recalculation_note', 'Manual admin recalculation.' );
+		$order->update_meta_data( '_wcprsv_breakdown', $breakdown );
+		$order->calculate_totals( false );
+		$this->reconcile_order_total( $order, $breakdown );
+		$order->save();
+
+		$updated = $this->analyze_order_recalculation( $order );
+		$updated['status'] = __( 'Herberekend', 'wc-pro-rata-shipping-vat' );
+
+		return $updated;
+	}
+
+	/**
+	 * Render maintenance results.
+	 *
+	 * @param array $results Results.
+	 * @return void
+	 */
+	private function render_maintenance_results( array $results ) {
+		if ( empty( $results ) ) {
+			return;
+		}
+
+		?>
+		<h2><?php echo esc_html__( 'Resultaten', 'wc-pro-rata-shipping-vat' ); ?></h2>
+		<table class="widefat striped">
+			<thead>
+				<tr>
+					<th><?php echo esc_html__( 'Order', 'wc-pro-rata-shipping-vat' ); ?></th>
+					<th><?php echo esc_html__( 'Datum', 'wc-pro-rata-shipping-vat' ); ?></th>
+					<th><?php echo esc_html__( 'Status', 'wc-pro-rata-shipping-vat' ); ?></th>
+					<th><?php echo esc_html__( 'Huidig totaal', 'wc-pro-rata-shipping-vat' ); ?></th>
+					<th><?php echo esc_html__( 'Nieuw totaal', 'wc-pro-rata-shipping-vat' ); ?></th>
+					<th><?php echo esc_html__( 'Verschil', 'wc-pro-rata-shipping-vat' ); ?></th>
+					<th><?php echo esc_html__( 'Verzend-BTW', 'wc-pro-rata-shipping-vat' ); ?></th>
+					<th><?php echo esc_html__( 'Bron', 'wc-pro-rata-shipping-vat' ); ?></th>
+				</tr>
+			</thead>
+			<tbody>
+				<?php foreach ( $results as $result ) : ?>
+					<tr>
+						<td><?php echo esc_html( $result['order_number'] ?? $result['order_id'] ); ?></td>
+						<td><?php echo esc_html( $result['date'] ?? '' ); ?></td>
+						<td>
+							<strong><?php echo esc_html( $result['status'] ?? '' ); ?></strong>
+							<?php if ( ! empty( $result['error'] ) ) : ?>
+								<br><span class="description"><?php echo esc_html( $result['error'] ); ?></span>
+							<?php endif; ?>
+						</td>
+						<td><?php echo isset( $result['current_total'] ) ? wp_kses_post( wc_price( $result['current_total'] ) ) : ''; ?></td>
+						<td><?php echo isset( $result['new_total'] ) ? wp_kses_post( wc_price( $result['new_total'] ) ) : ''; ?></td>
+						<td><?php echo isset( $result['difference'] ) ? wp_kses_post( wc_price( $result['difference'] ) ) : ''; ?></td>
+						<td>
+							<?php
+							if ( isset( $result['current_shipping_tax'], $result['new_shipping_tax'] ) ) {
+								echo wp_kses_post( wc_price( $result['current_shipping_tax'] ) . ' &rarr; ' . wc_price( $result['new_shipping_tax'] ) );
+							}
+							?>
+						</td>
+						<td><?php echo esc_html( $result['shipping_source'] ?? '' ); ?></td>
+					</tr>
+				<?php endforeach; ?>
+			</tbody>
+		</table>
+		<?php
 	}
 
 	/**
@@ -142,12 +841,67 @@ class WCPRSV_Plugin {
 	}
 
 	/**
+	 * Render the VAT breakdown on the customer order details page.
+	 *
+	 * @param WC_Order $order Order object.
+	 * @return void
+	 */
+	public function render_order_breakdown( $order ) {
+		if ( ! $this->settings->is_enabled() || ! wc_tax_enabled() || ! is_a( $order, 'WC_Order' ) ) {
+			return;
+		}
+
+		$breakdown = $this->get_order_breakdown( $order );
+
+		if ( empty( $breakdown['lines'] ) ) {
+			return;
+		}
+
+		echo $this->get_breakdown_html( $breakdown, $order ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped
+	}
+
+	/**
+	 * Render the VAT breakdown in WP Overnight PDF invoices.
+	 *
+	 * @param string   $document_type PDF document type.
+	 * @param WC_Order $order Order object.
+	 * @return void
+	 */
+	public function render_pdf_invoice_breakdown( $document_type, $order ) {
+		if ( ! $this->settings->is_enabled() || ! wc_tax_enabled() || 'invoice' !== $document_type || ! is_a( $order, 'WC_Order' ) ) {
+			return;
+		}
+
+		$breakdown = $this->get_order_breakdown( $order );
+
+		if ( empty( $breakdown['lines'] ) ) {
+			return;
+		}
+
+		echo $this->get_pdf_breakdown_html( $breakdown, $order ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped
+	}
+
+	/**
 	 * Enqueue frontend assets for Cart and Checkout Blocks.
 	 *
 	 * @return void
 	 */
 	public function enqueue_frontend_assets() {
-		if ( ! ( is_cart() || is_checkout() ) || ! $this->settings->is_enabled() || ! wc_tax_enabled() ) {
+		$should_enqueue_style = is_cart() || is_checkout() || ( function_exists( 'is_view_order_page' ) && is_view_order_page() );
+		$should_enqueue_script = is_cart() || is_checkout();
+
+		if ( ! $should_enqueue_style || ! $this->settings->is_enabled() || ! wc_tax_enabled() ) {
+			return;
+		}
+
+		wp_enqueue_style(
+			'wcprsv-frontend',
+			plugins_url( 'assets/frontend.css', WCPRSV_FILE ),
+			array(),
+			WCPRSV_VERSION
+		);
+
+		if ( ! $should_enqueue_script ) {
 			return;
 		}
 
@@ -159,19 +913,13 @@ class WCPRSV_Plugin {
 			true
 		);
 
-		wp_enqueue_style(
-			'wcprsv-frontend',
-			plugins_url( 'assets/frontend.css', WCPRSV_FILE ),
-			array(),
-			WCPRSV_VERSION
-		);
-
 		wp_localize_script(
 			'wcprsv-frontend',
 			'wcprsvData',
 			array(
 				'endpoint' => esc_url_raw( rest_url( 'wcprsv/v1/breakdown' ) ),
 				'nonce'    => wp_create_nonce( 'wp_rest' ),
+				'debug'    => $this->settings->is_debug_enabled(),
 			)
 		);
 	}
@@ -209,6 +957,7 @@ class WCPRSV_Plugin {
 			array(
 				'has_breakdown' => ! empty( $breakdown['lines'] ),
 				'html'          => ! empty( $breakdown['lines'] ) ? $this->get_breakdown_html( $breakdown ) : '',
+				'debug'         => $this->settings->is_debug_enabled() ? $this->get_frontend_debug_payload( $breakdown ) : null,
 			)
 		);
 	}
@@ -239,8 +988,7 @@ class WCPRSV_Plugin {
 				continue;
 			}
 
-			$rate      = $package['rates'][ $chosen_rate_id ];
-			$breakdown = is_a( $rate, 'WC_Shipping_Rate' ) ? $rate->get_meta( '_wcprsv_breakdown' ) : array();
+			$breakdown = $this->get_package_shipping_breakdown( $package_index, $package );
 
 			if ( empty( $breakdown['lines'] ) ) {
 				continue;
@@ -278,6 +1026,151 @@ class WCPRSV_Plugin {
 	}
 
 	/**
+	 * Get the pro-rata breakdown for a selected package shipping rate.
+	 *
+	 * @param string|int $package_key Package key.
+	 * @param array      $package Shipping package.
+	 * @return array
+	 */
+	private function get_package_shipping_breakdown( $package_key, $package ) {
+		if ( ! WC()->session ) {
+			return array();
+		}
+
+		$chosen_methods = WC()->session->get( 'chosen_shipping_methods', array() );
+		$chosen_rate_id = $chosen_methods[ $package_key ] ?? '';
+
+		if ( empty( $chosen_rate_id ) && ! empty( $package['rates'] ) && 1 === count( $package['rates'] ) ) {
+			$rate_ids = array_keys( $package['rates'] );
+			$chosen_rate_id = (string) reset( $rate_ids );
+		}
+
+		if ( empty( $chosen_rate_id ) ) {
+			return array();
+		}
+
+		if ( ! empty( $package['rates'][ $chosen_rate_id ] ) && is_a( $package['rates'][ $chosen_rate_id ], 'WC_Shipping_Rate' ) ) {
+			$rate      = $package['rates'][ $chosen_rate_id ];
+			$breakdown = $this->get_shipping_rate_meta( $package['rates'][ $chosen_rate_id ], '_wcprsv_breakdown' );
+
+			if ( ! empty( $breakdown['lines'] ) ) {
+				return $breakdown;
+			}
+		}
+
+		$breakdown = $this->get_session_breakdown( $chosen_rate_id );
+
+		if ( ! empty( $breakdown['lines'] ) ) {
+			return $breakdown;
+		}
+
+		if ( empty( $rate ) ) {
+			return array();
+		}
+
+		return $this->calculate_package_rate_breakdown( $rate, $package );
+	}
+
+	/**
+	 * Calculate a package shipping breakdown directly from a rate and package.
+	 *
+	 * @param WC_Shipping_Rate $rate Shipping rate.
+	 * @param array            $package Shipping package.
+	 * @return array
+	 */
+	private function calculate_package_rate_breakdown( $rate, array $package ) {
+		$goods_by_tax_rate = $this->get_goods_by_tax_rate( $package );
+
+		if ( empty( $goods_by_tax_rate ) ) {
+			return array();
+		}
+
+		$rate_cost = (float) $rate->get_cost();
+		$rate_tax  = array_sum( array_map( 'floatval', (array) $rate->get_taxes() ) );
+
+		if ( $rate_tax > 0 ) {
+			return $this->calculator->calculate_from_including_vat(
+				$rate_cost + $rate_tax,
+				$goods_by_tax_rate,
+				wc_get_price_decimals()
+			);
+		}
+
+		return $this->calculator->calculate(
+			$rate_cost,
+			$this->settings->get_reference_vat_rate(),
+			$goods_by_tax_rate,
+			wc_get_price_decimals()
+		);
+	}
+
+	/**
+	 * Read shipping rate metadata across WooCommerce versions.
+	 *
+	 * @param WC_Shipping_Rate $rate Shipping rate.
+	 * @param string           $key Meta key.
+	 * @return mixed
+	 */
+	private function get_shipping_rate_meta( $rate, $key ) {
+		if ( method_exists( $rate, 'get_meta' ) ) {
+			return $rate->get_meta( $key );
+		}
+
+		if ( ! method_exists( $rate, 'get_meta_data' ) ) {
+			return null;
+		}
+
+		foreach ( $rate->get_meta_data() as $meta ) {
+			if ( is_object( $meta ) && method_exists( $meta, 'get_data' ) ) {
+				$data = $meta->get_data();
+			} elseif ( is_array( $meta ) ) {
+				$data = $meta;
+			} else {
+				continue;
+			}
+
+			if ( isset( $data['key'] ) && $key === $data['key'] ) {
+				return $data['value'] ?? null;
+			}
+		}
+
+		return null;
+	}
+
+	/**
+	 * Store a shipping breakdown in the session for checkout order creation.
+	 *
+	 * @param string $rate_id Shipping rate ID.
+	 * @param array  $breakdown Pro-rata breakdown.
+	 * @return void
+	 */
+	private function store_session_breakdown( $rate_id, array $breakdown ) {
+		if ( ! WC()->session ) {
+			return;
+		}
+
+		$breakdowns = WC()->session->get( 'wcprsv_shipping_breakdowns', array() );
+		$breakdowns[ (string) $rate_id ] = $breakdown;
+		WC()->session->set( 'wcprsv_shipping_breakdowns', $breakdowns );
+	}
+
+	/**
+	 * Retrieve a shipping breakdown from the session.
+	 *
+	 * @param string $rate_id Shipping rate ID.
+	 * @return array
+	 */
+	private function get_session_breakdown( $rate_id ) {
+		if ( ! WC()->session ) {
+			return array();
+		}
+
+		$breakdowns = WC()->session->get( 'wcprsv_shipping_breakdowns', array() );
+
+		return ! empty( $breakdowns[ (string) $rate_id ]['lines'] ) ? $breakdowns[ (string) $rate_id ] : array();
+	}
+
+	/**
 	 * Calculate the display breakdown directly from the current cart totals.
 	 *
 	 * @return array
@@ -307,6 +1200,26 @@ class WCPRSV_Plugin {
 			$shipping_including_vat,
 			$goods_by_tax_rate,
 			wc_get_price_decimals()
+		);
+	}
+
+	/**
+	 * Build debug payload for browser devtools.
+	 *
+	 * @param array $breakdown Pro-rata breakdown.
+	 * @return array
+	 */
+	private function get_frontend_debug_payload( array $breakdown ) {
+		return array(
+			'cart'      => WC()->cart ? array(
+				'subtotal'       => WC()->cart->get_subtotal(),
+				'total'          => WC()->cart->get_total( 'edit' ),
+				'shipping_total' => WC()->cart->get_shipping_total(),
+				'shipping_tax'   => WC()->cart->get_shipping_tax(),
+				'taxes'          => WC()->cart->get_taxes(),
+			) : null,
+			'packages'  => WC()->shipping() ? $this->summarize_packages( WC()->shipping()->get_packages() ) : array(),
+			'breakdown' => $breakdown,
 		);
 	}
 
@@ -354,8 +1267,8 @@ class WCPRSV_Plugin {
 	 * @param array $breakdown Pro-rata breakdown.
 	 * @return string
 	 */
-	private function get_breakdown_html( array $breakdown ) {
-		$display_lines      = $this->get_display_lines( $breakdown['lines'], $breakdown );
+	private function get_breakdown_html( array $breakdown, $order = null ) {
+		$display_lines      = $this->get_display_lines( $breakdown['lines'], $breakdown, $order );
 		$goods_total        = $this->sum_display_column( $display_lines, 'goods_amount_ex_vat' );
 		$shipping_total     = $this->sum_display_column( $display_lines, 'shipping_excluding_vat' );
 		$goods_vat_total    = $this->sum_display_column( $display_lines, 'goods_vat' );
@@ -422,6 +1335,74 @@ class WCPRSV_Plugin {
 	}
 
 	/**
+	 * Build a PDF-friendly VAT breakdown table.
+	 *
+	 * @param array    $breakdown Pro-rata breakdown.
+	 * @param WC_Order $order Order object.
+	 * @return string
+	 */
+	private function get_pdf_breakdown_html( array $breakdown, $order ) {
+		$display_lines      = $this->get_display_lines( $breakdown['lines'], $breakdown, $order );
+		$goods_total        = $this->sum_display_column( $display_lines, 'goods_amount_ex_vat' );
+		$shipping_total     = $this->sum_display_column( $display_lines, 'shipping_excluding_vat' );
+		$goods_vat_total    = $this->sum_display_column( $display_lines, 'goods_vat' );
+		$shipping_vat_total = $this->sum_display_column( $display_lines, 'shipping_vat' );
+		$total_excluding    = $this->round_money( $goods_total + $shipping_total );
+		$total_vat          = $this->round_money( $goods_vat_total + $shipping_vat_total );
+		$total_including    = $this->round_money( $total_excluding + $total_vat );
+
+		ob_start();
+		?>
+		<div class="wcprsv-pdf-breakdown" style="margin-top: 18px;">
+			<h3 style="margin: 0 0 8px;"><?php echo esc_html__( 'BTW-specificatie', 'wc-pro-rata-shipping-vat' ); ?></h3>
+			<table style="width: 100%; border-collapse: collapse; font-size: 10px;">
+				<thead>
+					<tr>
+						<th style="border-bottom: 1px solid #999; text-align: left;"><?php echo esc_html__( 'Tarief', 'wc-pro-rata-shipping-vat' ); ?></th>
+						<th style="border-bottom: 1px solid #999; text-align: right;"><?php echo esc_html__( 'Goederen ex. BTW', 'wc-pro-rata-shipping-vat' ); ?></th>
+						<th style="border-bottom: 1px solid #999; text-align: right;"><?php echo esc_html__( 'Verzending ex. BTW', 'wc-pro-rata-shipping-vat' ); ?></th>
+						<th style="border-bottom: 1px solid #999; text-align: right;"><?php echo esc_html__( 'BTW goederen', 'wc-pro-rata-shipping-vat' ); ?></th>
+						<th style="border-bottom: 1px solid #999; text-align: right;"><?php echo esc_html__( 'BTW verzending', 'wc-pro-rata-shipping-vat' ); ?></th>
+						<th style="border-bottom: 1px solid #999; text-align: right;"><?php echo esc_html__( 'Incl. BTW', 'wc-pro-rata-shipping-vat' ); ?></th>
+					</tr>
+				</thead>
+				<tbody>
+					<?php foreach ( $display_lines as $line ) : ?>
+						<tr>
+							<td style="padding-top: 4px;"><?php echo esc_html( $this->format_vat_rate( $line['vat_rate'] ) ); ?></td>
+							<td style="padding-top: 4px; text-align: right;"><?php echo wp_kses_post( wc_price( $line['goods_amount_ex_vat'] ) ); ?></td>
+							<td style="padding-top: 4px; text-align: right;"><?php echo wp_kses_post( wc_price( $line['shipping_excluding_vat'] ) ); ?></td>
+							<td style="padding-top: 4px; text-align: right;"><?php echo wp_kses_post( wc_price( $line['goods_vat'] ) ); ?></td>
+							<td style="padding-top: 4px; text-align: right;"><?php echo wp_kses_post( wc_price( $line['shipping_vat'] ) ); ?></td>
+							<td style="padding-top: 4px; text-align: right;"><?php echo wp_kses_post( wc_price( $line['including_vat'] ) ); ?></td>
+						</tr>
+					<?php endforeach; ?>
+				</tbody>
+				<tfoot>
+					<tr>
+						<th style="border-top: 1px solid #999; padding-top: 5px; text-align: left;"><?php echo esc_html__( 'Totaal', 'wc-pro-rata-shipping-vat' ); ?></th>
+						<th style="border-top: 1px solid #999; padding-top: 5px; text-align: right;"><?php echo wp_kses_post( wc_price( $goods_total ) ); ?></th>
+						<th style="border-top: 1px solid #999; padding-top: 5px; text-align: right;"><?php echo wp_kses_post( wc_price( $shipping_total ) ); ?></th>
+						<th style="border-top: 1px solid #999; padding-top: 5px; text-align: right;"><?php echo wp_kses_post( wc_price( $goods_vat_total ) ); ?></th>
+						<th style="border-top: 1px solid #999; padding-top: 5px; text-align: right;"><?php echo wp_kses_post( wc_price( $shipping_vat_total ) ); ?></th>
+						<th style="border-top: 1px solid #999; padding-top: 5px; text-align: right;"><?php echo wp_kses_post( wc_price( $total_including ) ); ?></th>
+					</tr>
+					<tr>
+						<td colspan="5" style="padding-top: 5px; text-align: right;"><?php echo esc_html__( 'Totaal excl. BTW', 'wc-pro-rata-shipping-vat' ); ?></td>
+						<td style="padding-top: 5px; text-align: right;"><?php echo wp_kses_post( wc_price( $total_excluding ) ); ?></td>
+					</tr>
+					<tr>
+						<td colspan="5" style="text-align: right;"><?php echo esc_html__( 'Totaal BTW', 'wc-pro-rata-shipping-vat' ); ?></td>
+						<td style="text-align: right;"><?php echo wp_kses_post( wc_price( $total_vat ) ); ?></td>
+					</tr>
+				</tfoot>
+			</table>
+		</div>
+		<?php
+		return ob_get_clean();
+	}
+
+	/**
 	 * Sum goods VAT for display lines.
 	 *
 	 * @param array $lines Breakdown lines.
@@ -444,15 +1425,16 @@ class WCPRSV_Plugin {
 	 * @param array $breakdown Full breakdown totals.
 	 * @return array
 	 */
-	private function get_display_lines( array $lines, array $breakdown ) {
-		$display_lines = array();
-		$largest_key   = null;
-		$largest_total = -1.0;
+	private function get_display_lines( array $lines, array $breakdown, $order = null ) {
+		$display_lines           = array();
+		$order_goods_tax_by_rate = is_a( $order, 'WC_Order' ) ? $this->get_order_goods_tax_by_rate( $order ) : array();
+		$largest_key             = null;
+		$largest_total           = -1.0;
 
 		foreach ( $lines as $key => $line ) {
 			$goods_amount = $this->round_money( $line['goods_amount_ex_vat'] );
 			$shipping_ex  = $this->round_money( $line['shipping_excluding_vat'] );
-			$goods_vat    = $this->round_money( $goods_amount * $line['vat_rate'] );
+			$goods_vat    = array_key_exists( (string) $key, $order_goods_tax_by_rate ) ? $order_goods_tax_by_rate[ (string) $key ] : $this->round_money( $goods_amount * $line['vat_rate'] );
 			$shipping_vat = $this->round_money( $line['shipping_vat'] );
 			$total_vat    = $this->round_money( $goods_vat + $shipping_vat );
 			$including    = $this->round_money( $goods_amount + $shipping_ex + $total_vat );
@@ -473,7 +1455,7 @@ class WCPRSV_Plugin {
 			}
 		}
 
-		$this->reconcile_display_lines( $display_lines, $breakdown, $largest_key );
+		$this->reconcile_display_lines( $display_lines, $breakdown, $largest_key, $order );
 
 		return $display_lines;
 	}
@@ -486,12 +1468,12 @@ class WCPRSV_Plugin {
 	 * @param string|null $largest_key Line key that receives rounding deltas.
 	 * @return void
 	 */
-	private function reconcile_display_lines( array &$display_lines, array $breakdown, $largest_key ) {
+	private function reconcile_display_lines( array &$display_lines, array $breakdown, $largest_key, $order = null ) {
 		if ( empty( $display_lines ) || null === $largest_key || ! isset( $display_lines[ $largest_key ] ) ) {
 			return;
 		}
 
-		$cart_total_including     = $this->get_cart_total_including_vat();
+		$cart_total_including     = is_a( $order, 'WC_Order' ) ? 0.0 : $this->get_cart_total_including_vat();
 		$target_shipping_ex       = $this->round_money( $breakdown['shipping_excluding_vat'] );
 		$target_shipping_vat      = $this->round_money( $breakdown['shipping_including_vat'] - $breakdown['shipping_excluding_vat'] );
 		$target_shipping_incl     = $this->round_money( $breakdown['shipping_including_vat'] );
@@ -556,6 +1538,22 @@ class WCPRSV_Plugin {
 	}
 
 	/**
+	 * Get order goods tax totals keyed by WooCommerce tax rate ID.
+	 *
+	 * @param WC_Order $order Order object.
+	 * @return array
+	 */
+	private function get_order_goods_tax_by_rate( $order ) {
+		$goods_tax_by_rate = array();
+
+		foreach ( $order->get_items( 'tax' ) as $tax_item ) {
+			$goods_tax_by_rate[ (string) $tax_item->get_rate_id() ] = $this->round_money( $tax_item->get_tax_total() );
+		}
+
+		return $goods_tax_by_rate;
+	}
+
+	/**
 	 * Round a monetary display value like Excel ROUND(cell, 2).
 	 *
 	 * @param float $value Raw value.
@@ -576,6 +1574,352 @@ class WCPRSV_Plugin {
 		}
 
 		return $this->round_money( (float) WC()->cart->get_total( 'edit' ) );
+	}
+
+	/**
+	 * Get a pro-rata breakdown from order meta or order line items.
+	 *
+	 * @param WC_Order $order Order object.
+	 * @return array
+	 */
+	private function get_order_breakdown( $order ) {
+		$breakdown = $order->get_meta( '_wcprsv_breakdown' );
+
+		if ( ! empty( $breakdown['lines'] ) ) {
+			return $breakdown;
+		}
+
+		$breakdown = $this->get_breakdown_from_order_shipping_items( $order );
+
+		if ( ! empty( $breakdown['lines'] ) ) {
+			return $breakdown;
+		}
+
+		$goods_by_tax_rate = $this->get_order_goods_by_tax_rate( $order );
+		$shipping_incl     = $this->round_money( (float) $order->get_shipping_total() + (float) $order->get_shipping_tax() );
+
+		if ( empty( $goods_by_tax_rate ) || $shipping_incl <= 0 ) {
+			return array();
+		}
+
+		return $this->calculator->calculate_from_including_vat( $shipping_incl, $goods_by_tax_rate, wc_get_price_decimals() );
+	}
+
+	/**
+	 * Combine breakdown metadata stored on order shipping items.
+	 *
+	 * @param WC_Order $order Order object.
+	 * @return array
+	 */
+	private function get_breakdown_from_order_shipping_items( $order ) {
+		$combined = array(
+			'shipping_including_vat' => 0.0,
+			'shipping_excluding_vat' => 0.0,
+			'taxes'                  => array(),
+			'lines'                  => array(),
+		);
+
+		foreach ( $order->get_items( 'shipping' ) as $item ) {
+			$breakdown = $item->get_meta( '_wcprsv_breakdown' );
+
+			if ( empty( $breakdown['lines'] ) ) {
+				continue;
+			}
+
+			$combined['shipping_including_vat'] += (float) $breakdown['shipping_including_vat'];
+			$combined['shipping_excluding_vat'] += (float) $breakdown['shipping_excluding_vat'];
+
+			foreach ( $breakdown['taxes'] as $tax_rate_id => $tax_amount ) {
+				if ( ! isset( $combined['taxes'][ $tax_rate_id ] ) ) {
+					$combined['taxes'][ $tax_rate_id ] = 0.0;
+				}
+
+				$combined['taxes'][ $tax_rate_id ] += (float) $tax_amount;
+			}
+
+			foreach ( $breakdown['lines'] as $tax_rate_id => $line ) {
+				if ( ! isset( $combined['lines'][ $tax_rate_id ] ) ) {
+					$combined['lines'][ $tax_rate_id ] = $line;
+					continue;
+				}
+
+				$combined['lines'][ $tax_rate_id ]['goods_amount_ex_vat']    += (float) $line['goods_amount_ex_vat'];
+				$combined['lines'][ $tax_rate_id ]['shipping_excluding_vat'] += (float) $line['shipping_excluding_vat'];
+				$combined['lines'][ $tax_rate_id ]['shipping_vat']           += (float) $line['shipping_vat'];
+				$combined['lines'][ $tax_rate_id ]['shipping_including_vat'] += (float) $line['shipping_including_vat'];
+			}
+		}
+
+		return $combined;
+	}
+
+	/**
+	 * Apply pro-rata shipping tax amounts to WooCommerce order tax lines.
+	 *
+	 * @param WC_Order $order Order object.
+	 * @param array    $breakdown Pro-rata breakdown.
+	 * @return void
+	 */
+	private function apply_order_tax_lines( $order, array $breakdown ) {
+		if ( empty( $breakdown['taxes'] ) ) {
+			return;
+		}
+
+		$tax_items_by_rate_id = array();
+
+		foreach ( $order->get_items( 'tax' ) as $tax_item ) {
+			$tax_items_by_rate_id[ (string) $tax_item->get_rate_id() ] = $tax_item;
+
+			if ( method_exists( $tax_item, 'set_shipping_tax_total' ) ) {
+				$tax_item->set_shipping_tax_total( 0 );
+			}
+		}
+
+		foreach ( $breakdown['taxes'] as $rate_id => $shipping_tax_amount ) {
+			$rate_id = (string) $rate_id;
+
+			if ( ! isset( $tax_items_by_rate_id[ $rate_id ] ) ) {
+				$tax_item = $this->create_order_tax_item( $rate_id );
+				$order->add_item( $tax_item );
+				$tax_items_by_rate_id[ $rate_id ] = $tax_item;
+			}
+
+			if ( method_exists( $tax_items_by_rate_id[ $rate_id ], 'set_shipping_tax_total' ) ) {
+				$tax_items_by_rate_id[ $rate_id ]->set_shipping_tax_total( wc_format_decimal( $shipping_tax_amount, wc_get_price_decimals() ) );
+			}
+		}
+
+		$this->debug_log(
+			'apply_order_tax_lines',
+			array(
+				'order_id'   => $order->get_id(),
+				'breakdown_taxes' => $breakdown['taxes'],
+				'order_tax_items' => $this->summarize_order_tax_items( $order ),
+			)
+		);
+	}
+
+	/**
+	 * Create an order tax item for a WooCommerce tax rate.
+	 *
+	 * @param string $rate_id Tax rate ID.
+	 * @return WC_Order_Item_Tax
+	 */
+	private function create_order_tax_item( $rate_id ) {
+		$tax_rate = class_exists( 'WC_Tax' ) && method_exists( 'WC_Tax', '_get_tax_rate' ) ? WC_Tax::_get_tax_rate( $rate_id ) : array();
+		$tax_item = new WC_Order_Item_Tax();
+
+		$tax_item->set_rate_id( (int) $rate_id );
+		$tax_item->set_label( ! empty( $tax_rate['tax_rate_name'] ) ? $tax_rate['tax_rate_name'] : __( 'VAT', 'wc-pro-rata-shipping-vat' ) );
+		if ( method_exists( 'WC_Tax', 'get_rate_code' ) ) {
+			$tax_item->set_rate_code( WC_Tax::get_rate_code( $rate_id ) );
+		}
+		$tax_item->set_rate_percent( ! empty( $tax_rate['tax_rate'] ) ? (float) $tax_rate['tax_rate'] : 0 );
+		$tax_item->set_compound( ! empty( $tax_rate['tax_rate_compound'] ) );
+		$tax_item->set_tax_total( 0 );
+
+		if ( method_exists( $tax_item, 'set_shipping_tax_total' ) ) {
+			$tax_item->set_shipping_tax_total( 0 );
+		}
+
+		return $tax_item;
+	}
+
+	/**
+	 * Write a debug log entry when enabled.
+	 *
+	 * @param string $stage Stage name.
+	 * @param array  $data Debug data.
+	 * @return void
+	 */
+	private function debug_log( $stage, array $data = array() ) {
+		if ( ! $this->settings->is_debug_enabled() ) {
+			return;
+		}
+
+		$payload = array(
+			'stage' => $stage,
+			'data'  => $this->sanitize_debug_data( $data ),
+		);
+
+		try {
+			$message = wp_json_encode( $payload );
+
+			if ( ! is_string( $message ) || '' === $message ) {
+				$message = wp_json_encode(
+					array(
+						'stage' => $stage,
+						'error' => 'Could not encode debug payload.',
+					)
+				);
+			}
+
+			if ( function_exists( 'wc_get_logger' ) ) {
+				wc_get_logger()->debug( $message, array( 'source' => 'wc-pro-rata-shipping-vat' ) );
+				return;
+			}
+
+			error_log( '[wc-pro-rata-shipping-vat] ' . $message ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
+		} catch ( Throwable $e ) {
+			error_log( '[wc-pro-rata-shipping-vat] debug logging failed: ' . $e->getMessage() ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
+		}
+	}
+
+	/**
+	 * Sanitize debug data to keep checkout logging compact and safe.
+	 *
+	 * @param mixed $data Raw debug data.
+	 * @param int   $depth Current recursion depth.
+	 * @return mixed
+	 */
+	private function sanitize_debug_data( $data, $depth = 0 ) {
+		if ( $depth > 6 ) {
+			return '[max-depth]';
+		}
+
+		if ( is_null( $data ) || is_scalar( $data ) ) {
+			return $data;
+		}
+
+		if ( is_object( $data ) ) {
+			return array(
+				'object' => get_class( $data ),
+			);
+		}
+
+		if ( ! is_array( $data ) ) {
+			return '[' . gettype( $data ) . ']';
+		}
+
+		$output = array();
+		$count  = 0;
+
+		foreach ( $data as $key => $value ) {
+			if ( $count >= 80 ) {
+				$output['__truncated'] = count( $data ) - $count;
+				break;
+			}
+
+			$output[ $key ] = $this->sanitize_debug_data( $value, $depth + 1 );
+			$count++;
+		}
+
+		return $output;
+	}
+
+	/**
+	 * Summarize shipping packages for debug output.
+	 *
+	 * @param array $packages Shipping packages.
+	 * @return array
+	 */
+	private function summarize_packages( array $packages ) {
+		$summary = array();
+
+		foreach ( $packages as $index => $package ) {
+			$summary[ $index ] = $this->summarize_package( $package );
+		}
+
+		return $summary;
+	}
+
+	/**
+	 * Summarize one shipping package for debug output.
+	 *
+	 * @param array $package Shipping package.
+	 * @return array
+	 */
+	private function summarize_package( array $package ) {
+		$rates = array();
+
+		if ( ! empty( $package['rates'] ) ) {
+			foreach ( $package['rates'] as $rate_id => $rate ) {
+				if ( ! is_a( $rate, 'WC_Shipping_Rate' ) ) {
+					continue;
+				}
+
+				$rates[ $rate_id ] = array(
+					'id'     => $rate->get_id(),
+					'label'  => $rate->get_label(),
+					'cost'   => $rate->get_cost(),
+					'taxes'  => $rate->get_taxes(),
+				);
+			}
+		}
+
+		return array(
+			'contents_count' => ! empty( $package['contents'] ) && is_array( $package['contents'] ) ? count( $package['contents'] ) : 0,
+			'rates'          => $rates,
+		);
+	}
+
+	/**
+	 * Summarize order tax items for debug output.
+	 *
+	 * @param WC_Order $order Order object.
+	 * @return array
+	 */
+	private function summarize_order_tax_items( $order ) {
+		$items = array();
+
+		foreach ( $order->get_items( 'tax' ) as $item_id => $item ) {
+			$items[ $item_id ] = array(
+				'rate_id'            => $item->get_rate_id(),
+				'label'              => $item->get_label(),
+				'tax_total'          => $item->get_tax_total(),
+				'shipping_tax_total' => method_exists( $item, 'get_shipping_tax_total' ) ? $item->get_shipping_tax_total() : null,
+			);
+		}
+
+		return $items;
+	}
+
+	/**
+	 * Group order item totals by tax rate ID.
+	 *
+	 * @param WC_Order $order Order object.
+	 * @return array
+	 */
+	private function get_order_goods_by_tax_rate( $order ) {
+		$goods_by_tax_rate = array();
+
+		foreach ( $order->get_items( 'line_item' ) as $item ) {
+			$line_total = (float) $item->get_total();
+			$taxes      = $item->get_taxes();
+			$tax_totals = isset( $taxes['total'] ) && is_array( $taxes['total'] ) ? array_filter( $taxes['total'] ) : array();
+
+			if ( empty( $tax_totals ) ) {
+				$this->add_goods_amount( $goods_by_tax_rate, '0', 0.0, $line_total );
+				continue;
+			}
+
+			foreach ( $tax_totals as $rate_id => $tax_amount ) {
+				$rate = $this->get_tax_rate_decimal_by_id( $rate_id );
+				$this->add_goods_amount( $goods_by_tax_rate, $rate_id, $rate, $line_total );
+			}
+		}
+
+		return $goods_by_tax_rate;
+	}
+
+	/**
+	 * Get decimal tax rate by WooCommerce tax rate ID.
+	 *
+	 * @param string|int $rate_id Tax rate ID.
+	 * @return float
+	 */
+	private function get_tax_rate_decimal_by_id( $rate_id ) {
+		if ( ! class_exists( 'WC_Tax' ) || ! method_exists( 'WC_Tax', '_get_tax_rate' ) ) {
+			return 0.0;
+		}
+
+		$tax_rate = WC_Tax::_get_tax_rate( $rate_id );
+
+		if ( empty( $tax_rate['tax_rate'] ) ) {
+			return 0.0;
+		}
+
+		return max( 0.0, (float) $tax_rate['tax_rate'] / 100 );
 	}
 
 	/**
