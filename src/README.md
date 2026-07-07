@@ -48,105 +48,35 @@ Use `9` as the reference VAT rate when your shipping method is currently configu
 
 The plugin shows a compact VAT build-up on the cart and checkout pages. Customers can see the VAT per rate at a glance and open the calculation details for goods excluding VAT, shipping excluding VAT, goods VAT, shipping VAT, and total including VAT.
 
-## Development Status
-
-This is an initial implementation. Before public release, test it against:
-
-- Standard WooCommerce checkout
-- Your invoice plugin
-- Your e-boekhouden integration
-- Carts with only 0%, only 9%, only 21%, and mixed VAT products
-- Coupons and discounts
-
 ## Changelog
 
-### 0.1.19
+### 1.0.0
 
-- Improve existing order recalculation by recovering the original inclusive shipping amount from stored breakdown metadata, previous recalculations, and shipping item metadata.
+First production release.
 
-### 0.1.18
+This release contains the complete implementation and stabilization work from the 0.1.x development cycle:
 
-- Add a WooCommerce admin maintenance page to analyze and explicitly recalculate existing orders.
-- Store recalculation audit metadata on updated orders.
-
-### 0.1.17
-
-- Use stored WooCommerce order tax totals for invoice/order VAT specification rows to prevent one-cent display differences.
-
-### 0.1.16
-
-- Remove a direct call to WooCommerce's protected shipping item total-tax setter to prevent checkout fatal errors.
-
-### 0.1.15
-
-- Set shipping item tax data with both total and subtotal tax arrays so WooCommerce order totals include pro-rata shipping VAT.
-- Add an order total reconciliation fallback when WooCommerce keeps stale shipping tax totals.
-
-### 0.1.14
-
+- Calculate Dutch pro-rata VAT on WooCommerce shipping costs by converting the configured shipping amount to an inclusive amount and distributing it over the VAT rates present in the cart.
+- Support standard WooCommerce tax rates, including carts with 0%, 9%, 21%, and mixed VAT products.
+- Preserve the customer-facing inclusive shipping total while correcting the internal split between shipping excluding VAT and VAT per tax rate.
+- Add compatibility declarations for WooCommerce Cart and Checkout Blocks and HPOS.
+- Support both WooCommerce Blocks checkout and classic checkout.
+- Store the pro-rata breakdown in session data, shipping rate metadata, order shipping item metadata, and order metadata so later order views and invoices use the original calculation instead of recalculating from already-adjusted amounts.
+- Persist corrected shipping totals and shipping tax amounts on WooCommerce order shipping items.
+- Apply the pro-rata shipping VAT amounts to WooCommerce order tax lines so order totals, customer order views, invoices, and accounting exports use the same amounts.
+- Add late checkout finalizers for both Store API / Blocks checkout and classic checkout to repair order totals after WooCommerce has created the order.
+- Reconcile order totals when WooCommerce keeps stale shipping tax values after recalculation.
+- Add a compact customer-facing VAT specification on cart, checkout, and order detail pages.
+- Add an expandable calculation view showing goods excluding VAT, shipping excluding VAT, goods VAT, shipping VAT, and totals per VAT rate.
+- Add a PDF invoice VAT specification for WP Overnight PDF invoices.
+- Improve the VAT specification layout from a raw table to a compact, responsive summary with detail rows.
+- Use Excel-style two-decimal rounding for visible values and reconcile displayed totals so customers do not see cent-level inconsistencies.
+- Use stored WooCommerce order tax totals for invoice/order VAT specification rows to avoid one-cent differences between WooCommerce totals and the PDF specification.
+- Fix Store API / Blocks checkout cases where selected shipping rate metadata was unavailable by recalculating from package/order data when needed.
+- Fix checkout fatal errors caused by WooCommerce API differences, including unavailable `WC_Shipping_Rate::get_meta()` and protected shipping item tax methods.
+- Add compatibility guards around WooCommerce tax item methods.
+- Add a debug setting that logs calculation stages to the browser console and WooCommerce logs.
 - Make debug logging compact and exception-safe so it cannot block checkout.
-- Stop recalculating order totals in the early checkout create-order hook; order mutations remain in the late checkout finalizers.
-
-### 0.1.13
-
-- Add a debug setting for browser console and WooCommerce log output.
-- Log pro-rata shipping VAT values across package rate calculation, checkout shipping item creation, order finalization, tax line application, and cart breakdown rendering.
-
-### 0.1.12
-
-- Add a late Store API checkout finalizer that reapplies the correct pro-rata shipping totals after WooCommerce Blocks has built the order.
-- Save corrected order shipping items, tax lines, order metadata, and totals before payment processing.
-
-### 0.1.11
-
-- Fix mixed-rate Store API orders where the selected shipping rate metadata is unavailable by recalculating the breakdown directly from the order shipping item and package contents.
-
-### 0.1.10
-
-- Add a Store API checkout fallback that recalculates the pro-rata shipping breakdown directly from the selected package rate when shipping rate metadata/session data is unavailable.
-
-### 0.1.9
-
-- Fix checkout fatal error on WooCommerce versions where `WC_Shipping_Rate` does not expose `get_meta()`.
-- Add compatibility guards around order tax line methods.
-
-### 0.1.8
-
-- Store the original pro-rata shipping breakdown in the session and on order shipping items so invoices do not recalculate from already-exclusive shipping totals.
-- Recalculate order totals after applying pro-rata shipping taxes during checkout.
-- Apply pro-rata shipping tax amounts to WooCommerce order tax lines for invoices and accounting exports.
-
-### 0.1.7
-
-- Persist pro-rata shipping tax amounts on WooCommerce order shipping items during checkout.
-- Show the VAT breakdown on customer order details and WP Overnight PDF invoices.
-
-### 0.1.6
-
-- Reconcile the displayed VAT breakdown with WooCommerce cart totals so the visible breakdown, checkout total, and accounting export stay aligned.
-
-### 0.1.5
-
-- Round the customer-facing VAT breakdown per visible cell so displayed totals add up exactly.
-
-### 0.1.4
-
-- Improve the VAT breakdown layout with a compact summary and expandable calculation details.
-
-### 0.1.3
-
-- Show the full VAT build-up for goods and shipping on cart and checkout pages.
-- Add a direct cart-total fallback for the customer-facing breakdown.
-
-### 0.1.2
-
-- Improve cart and checkout breakdown placement.
-- Prevent repeated block checkout refresh calls.
-
-### 0.1.1
-
-- Show the pro-rata shipping VAT calculation on cart and checkout pages.
-
-### 0.1.0
-
-- Initial version.
+- Add a WooCommerce admin maintenance page to analyze and explicitly recalculate existing orders.
+- Store audit metadata when an order is manually recalculated, including previous breakdown data, recalculation time, user, and note.
+- Improve existing order recalculation by recovering the original inclusive shipping amount from stored breakdown metadata, previous recalculation history, and shipping item metadata.
