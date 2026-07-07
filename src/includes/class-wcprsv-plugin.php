@@ -61,9 +61,11 @@ class WCPRSV_Plugin {
 	 * @return void
 	 */
 	public function init() {
+		$this->load_textdomain();
 		$this->settings->init();
 
 		add_filter( 'woocommerce_package_rates', array( $this, 'recalculate_package_rates' ), 100, 2 );
+		add_filter( 'woocommerce_store_api_cart_shipping_rates', array( $this, 'enrich_store_api_shipping_rates' ), 100, 2 );
 		add_action( 'woocommerce_checkout_create_order_shipping_item', array( $this, 'set_order_shipping_item_taxes' ), 20, 4 );
 		add_action( 'woocommerce_checkout_create_order', array( $this, 'store_order_breakdown' ), 20, 2 );
 		add_action( 'woocommerce_store_api_checkout_order_processed', array( $this, 'finalize_store_api_order' ), 20, 1 );
@@ -75,6 +77,19 @@ class WCPRSV_Plugin {
 		add_action( 'wp_enqueue_scripts', array( $this, 'enqueue_frontend_assets' ) );
 		add_action( 'rest_api_init', array( $this, 'register_storefront_endpoint' ) );
 		add_action( 'admin_menu', array( $this, 'register_admin_menu' ) );
+	}
+
+	/**
+	 * Load translations when present.
+	 *
+	 * @return void
+	 */
+	public function load_textdomain() {
+		load_plugin_textdomain(
+			'wc-pro-rata-shipping-vat',
+			false,
+			dirname( plugin_basename( WCPRSV_FILE ) ) . '/languages'
+		);
 	}
 
 	/**
@@ -137,6 +152,121 @@ class WCPRSV_Plugin {
 		}
 
 		return $rates;
+	}
+
+	/**
+	 * Add pro-rata breakdown metadata to WooCommerce Blocks Store API shipping rates.
+	 *
+	 * @param array $shipping_rates Store API shipping rates.
+	 * @param mixed $cart Store API cart object.
+	 * @return array
+	 */
+	public function enrich_store_api_shipping_rates( $shipping_rates, $cart ) {
+		if ( ! $this->settings->is_enabled() || ! wc_tax_enabled() || empty( $shipping_rates ) || ! WC()->shipping() ) {
+			return $shipping_rates;
+		}
+
+		$packages = WC()->shipping()->get_packages();
+
+		foreach ( $shipping_rates as $package_index => &$package_data ) {
+			if ( empty( $package_data['shipping_rates'] ) || ! is_array( $package_data['shipping_rates'] ) ) {
+				continue;
+			}
+
+			$package_key = isset( $package_data['package_id'] ) ? absint( $package_data['package_id'] ) : $package_index;
+			$package     = $packages[ $package_key ] ?? $packages[ $package_index ] ?? array();
+
+			if ( empty( $package['rates'] ) ) {
+				continue;
+			}
+
+			foreach ( $package_data['shipping_rates'] as &$rate_data ) {
+				if ( $this->is_store_api_rate_free( $rate_data ) ) {
+					continue;
+				}
+
+				$rate_id = $rate_data['rate_id'] ?? $rate_data['id'] ?? '';
+				$rate    = ! empty( $rate_id ) && ! empty( $package['rates'][ $rate_id ] ) ? $package['rates'][ $rate_id ] : null;
+
+				if ( ! is_a( $rate, 'WC_Shipping_Rate' ) && 1 === count( $package['rates'] ) ) {
+					$rate = reset( $package['rates'] );
+				}
+
+				if ( ! is_a( $rate, 'WC_Shipping_Rate' ) ) {
+					continue;
+				}
+
+				$breakdown = $this->get_shipping_rate_meta( $rate, '_wcprsv_breakdown' );
+
+				if ( empty( $breakdown['lines'] ) ) {
+					$breakdown = $this->calculate_package_rate_breakdown( $rate, $package );
+				}
+
+				if ( empty( $breakdown['lines'] ) || $this->round_money( $breakdown['shipping_including_vat'] ) <= 0 ) {
+					continue;
+				}
+
+				$this->add_breakdown_to_store_api_rate( $rate_data, $breakdown );
+			}
+			unset( $rate_data );
+		}
+		unset( $package_data );
+
+		return $shipping_rates;
+	}
+
+	/**
+	 * Determine whether a Store API shipping rate is free.
+	 *
+	 * @param array $rate_data Store API rate data.
+	 * @return bool
+	 */
+	private function is_store_api_rate_free( array $rate_data ) {
+		$price = $rate_data['price'] ?? $rate_data['cost'] ?? null;
+
+		if ( isset( $rate_data['prices']['price'] ) ) {
+			$price = $rate_data['prices']['price'];
+		}
+
+		if ( null === $price ) {
+			return false;
+		}
+
+		return 0.0 === (float) $price;
+	}
+
+	/**
+	 * Add breakdown data to one Store API shipping rate.
+	 *
+	 * @param array $rate_data Store API rate data.
+	 * @param array $breakdown Pro-rata breakdown.
+	 * @return void
+	 */
+	private function add_breakdown_to_store_api_rate( array &$rate_data, array $breakdown ) {
+		$rate_data['_wcprsv_breakdown'] = $breakdown;
+
+		if ( empty( $rate_data['meta_data'] ) || ! is_array( $rate_data['meta_data'] ) ) {
+			$rate_data['meta_data'] = array();
+		}
+
+		$encoded = wp_json_encode( $breakdown );
+		$updated = false;
+
+		foreach ( $rate_data['meta_data'] as &$meta ) {
+			if ( is_array( $meta ) && isset( $meta['key'] ) && '_wcprsv_breakdown' === $meta['key'] ) {
+				$meta['value'] = $encoded;
+				$updated = true;
+				break;
+			}
+		}
+		unset( $meta );
+
+		if ( ! $updated ) {
+			$rate_data['meta_data'][] = array(
+				'key'   => '_wcprsv_breakdown',
+				'value' => $encoded,
+			);
+		}
 	}
 
 	/**
@@ -861,18 +991,18 @@ class WCPRSV_Plugin {
 	}
 
 	/**
-	 * Render the VAT breakdown in WP Overnight PDF invoices.
+	 * Render the VAT breakdown in WP Overnight PDF invoices and credit notes.
 	 *
-	 * @param string   $document_type PDF document type.
-	 * @param WC_Order $order Order object.
+	 * @param string $document_type PDF document type.
+	 * @param mixed  $order Order or refund object.
 	 * @return void
 	 */
 	public function render_pdf_invoice_breakdown( $document_type, $order ) {
-		if ( ! $this->settings->is_enabled() || ! wc_tax_enabled() || 'invoice' !== $document_type || ! is_a( $order, 'WC_Order' ) ) {
+		if ( ! $this->settings->is_enabled() || ! wc_tax_enabled() || ! $this->is_supported_pdf_document_type( $document_type ) || ! is_object( $order ) || ! method_exists( $order, 'get_items' ) ) {
 			return;
 		}
 
-		$breakdown = $this->get_order_breakdown( $order );
+		$breakdown = $this->is_credit_note_document_type( $document_type ) ? $this->get_credit_note_breakdown( $order ) : $this->get_order_breakdown( $order );
 
 		if ( empty( $breakdown['lines'] ) ) {
 			return;
@@ -905,10 +1035,20 @@ class WCPRSV_Plugin {
 			return;
 		}
 
+		$dependencies = array();
+
+		if ( wp_script_is( 'wp-data', 'registered' ) ) {
+			$dependencies[] = 'wp-data';
+		}
+
+		if ( wp_script_is( 'wc-blocks-data-store', 'registered' ) ) {
+			$dependencies[] = 'wc-blocks-data-store';
+		}
+
 		wp_enqueue_script(
 			'wcprsv-frontend',
 			plugins_url( 'assets/frontend.js', WCPRSV_FILE ),
-			array(),
+			$dependencies,
 			WCPRSV_VERSION,
 			true
 		);
@@ -917,9 +1057,10 @@ class WCPRSV_Plugin {
 			'wcprsv-frontend',
 			'wcprsvData',
 			array(
-				'endpoint' => esc_url_raw( rest_url( 'wcprsv/v1/breakdown' ) ),
-				'nonce'    => wp_create_nonce( 'wp_rest' ),
-				'debug'    => $this->settings->is_debug_enabled(),
+				'endpoint'       => esc_url_raw( rest_url( 'wcprsv/v1/breakdown' ) ),
+				'nonce'          => wp_create_nonce( 'wp_rest' ),
+				'debug'          => $this->settings->is_debug_enabled(),
+				'price_decimals' => wc_get_price_decimals(),
 			)
 		);
 	}
@@ -934,7 +1075,7 @@ class WCPRSV_Plugin {
 			'wcprsv/v1',
 			'/breakdown',
 			array(
-				'methods'             => 'GET',
+				'methods'             => array( 'GET', 'POST' ),
 				'callback'            => array( $this, 'get_breakdown_response' ),
 				'permission_callback' => '__return_true',
 			)
@@ -946,18 +1087,23 @@ class WCPRSV_Plugin {
 	 *
 	 * @return WP_REST_Response
 	 */
-	public function get_breakdown_response() {
+	public function get_breakdown_response( $request = null ) {
 		if ( function_exists( 'wc_load_cart' ) ) {
 			wc_load_cart();
 		}
 
 		$breakdown = $this->get_selected_shipping_breakdown();
+		$snapshot  = is_a( $request, 'WP_REST_Request' ) ? $request->get_param( 'blocks_snapshot' ) : null;
+
+		if ( empty( $breakdown['lines'] ) && is_array( $snapshot ) ) {
+			$breakdown = $this->calculate_breakdown_from_blocks_snapshot( $snapshot );
+		}
 
 		return rest_ensure_response(
 			array(
 				'has_breakdown' => ! empty( $breakdown['lines'] ),
 				'html'          => ! empty( $breakdown['lines'] ) ? $this->get_breakdown_html( $breakdown ) : '',
-				'debug'         => $this->settings->is_debug_enabled() ? $this->get_frontend_debug_payload( $breakdown ) : null,
+				'debug'         => $this->settings->is_debug_enabled() ? $this->get_frontend_debug_payload( $breakdown, $snapshot ) : null,
 			)
 		);
 	}
@@ -970,6 +1116,12 @@ class WCPRSV_Plugin {
 	private function get_selected_shipping_breakdown() {
 		if ( ! WC()->cart || ! WC()->session ) {
 			return array();
+		}
+
+		$current_shipping_including_vat = $this->get_current_shipping_including_vat( false );
+
+		if ( $current_shipping_including_vat <= 0 ) {
+			return $this->calculate_current_cart_breakdown();
 		}
 
 		$packages       = WC()->shipping() ? WC()->shipping()->get_packages() : array();
@@ -1019,7 +1171,12 @@ class WCPRSV_Plugin {
 		}
 
 		if ( ! empty( $combined['lines'] ) ) {
-			return $combined;
+			$combined_shipping_including_vat = $this->round_money( $combined['shipping_including_vat'] );
+			$current_shipping_including_vat  = $this->round_money( $current_shipping_including_vat );
+
+			if ( $combined_shipping_including_vat === $current_shipping_including_vat ) {
+				return $combined;
+			}
 		}
 
 		return $this->calculate_current_cart_breakdown();
@@ -1192,15 +1349,605 @@ class WCPRSV_Plugin {
 
 		$shipping_including_vat = $this->get_current_shipping_including_vat();
 
-		if ( $shipping_including_vat <= 0 ) {
-			return array();
-		}
-
-		return $this->calculator->calculate_from_including_vat(
+		$breakdown = $this->calculator->calculate_from_including_vat(
 			$shipping_including_vat,
 			$goods_by_tax_rate,
 			wc_get_price_decimals()
 		);
+
+		return empty( $breakdown['lines'] ) ? $this->build_zero_shipping_breakdown( $goods_by_tax_rate ) : $breakdown;
+	}
+
+	/**
+	 * Build a breakdown from WooCommerce Blocks cart store data.
+	 *
+	 * @param array $snapshot Blocks cart snapshot.
+	 * @return array
+	 */
+	private function calculate_breakdown_from_blocks_snapshot( array $snapshot ) {
+		$has_snapshot_shipping_totals = $this->blocks_snapshot_has_shipping_totals( $snapshot );
+		$snapshot_shipping_incl      = $this->get_blocks_snapshot_shipping_including_vat( $snapshot );
+
+		if ( $has_snapshot_shipping_totals && $snapshot_shipping_incl <= 0 ) {
+			return $this->calculate_breakdown_from_blocks_totals( $snapshot, 0.0 );
+		}
+
+		$selected_rates        = $this->get_blocks_snapshot_selected_shipping_rates( $snapshot );
+		$has_selected_rates    = ! empty( $selected_rates );
+		$selected_shipping_incl = $has_selected_rates ? $this->get_blocks_shipping_rates_including_vat( $selected_rates, $snapshot ) : 0.0;
+
+		if ( $has_selected_rates && $selected_shipping_incl <= 0 ) {
+			return $this->calculate_breakdown_from_blocks_totals( $snapshot, 0.0 );
+		}
+
+		$current_shipping_incl = $has_snapshot_shipping_totals ? $snapshot_shipping_incl : $selected_shipping_incl;
+
+		if ( $current_shipping_incl <= 0 ) {
+			return $this->calculate_breakdown_from_blocks_totals( $snapshot, 0.0 );
+		}
+
+		$candidates = $has_selected_rates ? $this->get_blocks_shipping_rate_breakdown_candidates( $selected_rates ) : $this->get_blocks_snapshot_breakdown_candidates( $snapshot );
+
+		if ( empty( $candidates ) ) {
+			return $this->calculate_breakdown_from_blocks_totals( $snapshot, $current_shipping_incl );
+		}
+
+		$combined = $this->combine_breakdowns( $candidates );
+
+		if ( ! empty( $combined['lines'] ) && $this->round_money( $combined['shipping_including_vat'] ) === $this->round_money( $current_shipping_incl ) ) {
+			return $this->apply_blocks_snapshot_goods_tax( $combined, $snapshot );
+		}
+
+		foreach ( $candidates as $candidate ) {
+			if ( ! empty( $candidate['lines'] ) && $this->round_money( $candidate['shipping_including_vat'] ) === $this->round_money( $current_shipping_incl ) ) {
+				return $this->apply_blocks_snapshot_goods_tax( $candidate, $snapshot );
+			}
+		}
+
+		if ( 1 === count( $candidates ) ) {
+			return $this->apply_blocks_snapshot_goods_tax( reset( $candidates ), $snapshot );
+		}
+
+		return $this->calculate_breakdown_from_blocks_totals( $snapshot, $current_shipping_incl );
+	}
+
+	/**
+	 * Rebuild a Blocks breakdown from current cart totals when rate metadata is missing.
+	 *
+	 * @param array $snapshot Blocks cart snapshot.
+	 * @param float $shipping_including_vat Current shipping including VAT.
+	 * @return array
+	 */
+	private function calculate_breakdown_from_blocks_totals( array $snapshot, $shipping_including_vat ) {
+		$goods_by_tax_rate = $this->get_blocks_snapshot_goods_by_tax_rate( $snapshot );
+
+		if ( empty( $goods_by_tax_rate ) ) {
+			return array();
+		}
+
+		$breakdown = $this->calculator->calculate_from_including_vat(
+			$shipping_including_vat,
+			$goods_by_tax_rate,
+			$this->get_blocks_snapshot_minor_units( $snapshot )
+		);
+
+		if ( empty( $breakdown['lines'] ) ) {
+			$breakdown = $this->build_zero_shipping_breakdown( $goods_by_tax_rate );
+		}
+
+		return $this->apply_blocks_snapshot_goods_tax( $breakdown, $snapshot );
+	}
+
+	/**
+	 * Build a goods VAT specification when there are no shipping costs.
+	 *
+	 * @param array $goods_by_tax_rate Goods totals keyed by tax rate.
+	 * @return array
+	 */
+	private function build_zero_shipping_breakdown( array $goods_by_tax_rate ) {
+		$total_goods = 0.0;
+
+		foreach ( $goods_by_tax_rate as $data ) {
+			$total_goods += max( 0.0, (float) ( $data['amount_ex_vat'] ?? 0 ) );
+		}
+
+		$breakdown = array(
+			'shipping_including_vat' => 0.0,
+			'shipping_excluding_vat' => 0.0,
+			'taxes'                  => array(),
+			'lines'                  => array(),
+		);
+
+		if ( $total_goods <= 0 ) {
+			return $breakdown;
+		}
+
+		foreach ( $goods_by_tax_rate as $tax_rate_id => $data ) {
+			$goods_amount = max( 0.0, (float) ( $data['amount_ex_vat'] ?? 0 ) );
+			$vat_rate     = max( 0.0, (float) ( $data['rate'] ?? 0 ) );
+
+			if ( $goods_amount <= 0 ) {
+				continue;
+			}
+
+			$tax_rate_id = (string) $tax_rate_id;
+
+			$breakdown['taxes'][ $tax_rate_id ] = 0.0;
+			$breakdown['lines'][ $tax_rate_id ] = array(
+				'goods_amount_ex_vat'       => $goods_amount,
+				'vat_rate'                  => $vat_rate,
+				'share'                     => $goods_amount / $total_goods,
+				'shipping_excluding_vat'    => 0.0,
+				'shipping_vat'              => 0.0,
+				'shipping_including_vat'    => 0.0,
+				'unrounded_excluding_vat'   => 0.0,
+				'unrounded_vat'             => 0.0,
+				'unrounded_including_vat'   => 0.0,
+			);
+		}
+
+		return $breakdown;
+	}
+
+	/**
+	 * Get the selected shipping rates from a Blocks cart snapshot.
+	 *
+	 * @param array $snapshot Blocks cart snapshot.
+	 * @return array
+	 */
+	private function get_blocks_snapshot_selected_shipping_rates( array $snapshot ) {
+		$shipping_groups = array();
+
+		if ( ! empty( $snapshot['shippingRates'] ) && is_array( $snapshot['shippingRates'] ) ) {
+			$shipping_groups = $snapshot['shippingRates'];
+		} elseif ( ! empty( $snapshot['cartData']['shippingRates'] ) && is_array( $snapshot['cartData']['shippingRates'] ) ) {
+			$shipping_groups = $snapshot['cartData']['shippingRates'];
+		}
+
+		$selected = array();
+
+		foreach ( $shipping_groups as $group ) {
+			if ( ! is_array( $group ) ) {
+				continue;
+			}
+
+			$rates = array();
+
+			if ( ! empty( $group['shipping_rates'] ) && is_array( $group['shipping_rates'] ) ) {
+				$rates = $group['shipping_rates'];
+			} elseif ( ! empty( $group['rates'] ) && is_array( $group['rates'] ) ) {
+				$rates = $group['rates'];
+			}
+
+			foreach ( $rates as $rate ) {
+				if ( is_array( $rate ) && ! empty( $rate['selected'] ) ) {
+					$selected[] = $rate;
+				}
+			}
+
+			if ( empty( $selected ) && 1 === count( $rates ) && is_array( reset( $rates ) ) ) {
+				$selected[] = reset( $rates );
+			}
+		}
+
+		return $selected;
+	}
+
+	/**
+	 * Determine whether a Blocks snapshot contains authoritative shipping totals.
+	 *
+	 * @param array $snapshot Blocks cart snapshot.
+	 * @return bool
+	 */
+	private function blocks_snapshot_has_shipping_totals( array $snapshot ) {
+		$totals = ! empty( $snapshot['totals'] ) && is_array( $snapshot['totals'] ) ? $snapshot['totals'] : array();
+
+		if ( array_key_exists( 'total_shipping', $totals ) || array_key_exists( 'total_shipping_tax', $totals ) ) {
+			return true;
+		}
+
+		return isset( $snapshot['cartData']['totals'] ) && is_array( $snapshot['cartData']['totals'] ) && ( array_key_exists( 'total_shipping', $snapshot['cartData']['totals'] ) || array_key_exists( 'total_shipping_tax', $snapshot['cartData']['totals'] ) );
+	}
+
+	/**
+	 * Get selected Blocks shipping rates including VAT.
+	 *
+	 * @param array $rates Selected Store API rates.
+	 * @param array $snapshot Blocks cart snapshot.
+	 * @return float
+	 */
+	private function get_blocks_shipping_rates_including_vat( array $rates, array $snapshot ) {
+		$minor_units = $this->get_blocks_snapshot_minor_units( $snapshot );
+		$total       = 0.0;
+
+		foreach ( $rates as $rate ) {
+			if ( ! is_array( $rate ) ) {
+				continue;
+			}
+
+			$price = $rate['price'] ?? $rate['cost'] ?? 0;
+
+			if ( isset( $rate['prices']['price'] ) ) {
+				$price = $rate['prices']['price'];
+			}
+
+			$total += $this->parse_store_api_amount( $price, $minor_units );
+
+			if ( ! empty( $rate['taxes'] ) && is_array( $rate['taxes'] ) ) {
+				foreach ( $rate['taxes'] as $tax ) {
+					if ( is_array( $tax ) ) {
+						$total += $this->parse_store_api_amount( $tax['price'] ?? $tax['total'] ?? 0, $minor_units );
+					} else {
+						$total += $this->parse_store_api_amount( $tax, $minor_units );
+					}
+				}
+			}
+		}
+
+		return $this->round_money( $total );
+	}
+
+	/**
+	 * Get current shipping including VAT from a Blocks cart snapshot.
+	 *
+	 * @param array $snapshot Blocks cart snapshot.
+	 * @return float
+	 */
+	private function get_blocks_snapshot_shipping_including_vat( array $snapshot ) {
+		$totals      = ! empty( $snapshot['totals'] ) && is_array( $snapshot['totals'] ) ? $snapshot['totals'] : array();
+		$totals      = empty( $totals ) && ! empty( $snapshot['cartData']['totals'] ) && is_array( $snapshot['cartData']['totals'] ) ? $snapshot['cartData']['totals'] : $totals;
+		$minor_units = $this->get_blocks_snapshot_minor_units( $snapshot );
+		$shipping    = $this->parse_store_api_amount( $totals['total_shipping'] ?? 0, $minor_units );
+		$shipping_tax = $this->parse_store_api_amount( $totals['total_shipping_tax'] ?? 0, $minor_units );
+
+		return $this->round_money( $shipping + $shipping_tax );
+	}
+
+	/**
+	 * Get currency minor units from a Blocks cart snapshot.
+	 *
+	 * @param array $snapshot Blocks cart snapshot.
+	 * @return int
+	 */
+	private function get_blocks_snapshot_minor_units( array $snapshot ) {
+		$totals = ! empty( $snapshot['totals'] ) && is_array( $snapshot['totals'] ) ? $snapshot['totals'] : array();
+
+		if ( isset( $totals['currency_minor_unit'] ) ) {
+			return absint( $totals['currency_minor_unit'] );
+		}
+
+		if ( isset( $snapshot['cartData']['totals']['currency_minor_unit'] ) ) {
+			return absint( $snapshot['cartData']['totals']['currency_minor_unit'] );
+		}
+
+		return wc_get_price_decimals();
+	}
+
+	/**
+	 * Parse a WooCommerce Store API amount.
+	 *
+	 * @param mixed $amount Store API amount.
+	 * @param int   $minor_units Currency minor units.
+	 * @return float
+	 */
+	private function parse_store_api_amount( $amount, $minor_units ) {
+		$amount = trim( (string) $amount );
+
+		if ( '' === $amount ) {
+			return 0.0;
+		}
+
+		if ( false !== strpos( $amount, '.' ) || false !== strpos( $amount, ',' ) ) {
+			return (float) str_replace( ',', '.', $amount );
+		}
+
+		return (float) $amount / ( 10 ** max( 0, (int) $minor_units ) );
+	}
+
+	/**
+	 * Find breakdown metadata in a Blocks cart snapshot.
+	 *
+	 * @param array $snapshot Blocks cart snapshot.
+	 * @return array
+	 */
+	private function get_blocks_snapshot_breakdown_candidates( array $snapshot ) {
+		$candidates = array();
+		$this->collect_blocks_snapshot_breakdowns( $snapshot, $candidates );
+
+		return array_values( $candidates );
+	}
+
+	/**
+	 * Find breakdown metadata in selected Blocks shipping rates.
+	 *
+	 * @param array $rates Selected Store API rates.
+	 * @return array
+	 */
+	private function get_blocks_shipping_rate_breakdown_candidates( array $rates ) {
+		$candidates = array();
+
+		foreach ( $rates as $rate ) {
+			$this->collect_blocks_snapshot_breakdowns( $rate, $candidates );
+		}
+
+		return array_values( $candidates );
+	}
+
+	/**
+	 * Apply Store API product tax totals to display breakdown lines.
+	 *
+	 * @param array $breakdown Pro-rata breakdown.
+	 * @param array $snapshot Blocks cart snapshot.
+	 * @return array
+	 */
+	private function apply_blocks_snapshot_goods_tax( array $breakdown, array $snapshot ) {
+		$tax_by_rate = $this->get_blocks_snapshot_tax_by_rate( $snapshot );
+
+		if ( empty( $tax_by_rate ) || empty( $breakdown['lines'] ) ) {
+			return $breakdown;
+		}
+
+		foreach ( $breakdown['lines'] as &$line ) {
+			$key = $this->format_tax_rate_key( $line['vat_rate'] );
+
+			if ( ! isset( $tax_by_rate[ $key ] ) ) {
+				continue;
+			}
+
+			$line['goods_vat'] = $this->round_money( $tax_by_rate[ $key ] - (float) $line['shipping_vat'] );
+		}
+		unset( $line );
+
+		return $breakdown;
+	}
+
+	/**
+	 * Get Store API tax totals keyed by percentage.
+	 *
+	 * @param array $snapshot Blocks cart snapshot.
+	 * @return array
+	 */
+	private function get_blocks_snapshot_tax_by_rate( array $snapshot ) {
+		$totals      = ! empty( $snapshot['totals'] ) && is_array( $snapshot['totals'] ) ? $snapshot['totals'] : array();
+		$tax_lines   = ! empty( $totals['tax_lines'] ) && is_array( $totals['tax_lines'] ) ? $totals['tax_lines'] : array();
+		$minor_units = $this->get_blocks_snapshot_minor_units( $snapshot );
+
+		if ( empty( $tax_lines ) && ! empty( $snapshot['cartData']['totals']['tax_lines'] ) && is_array( $snapshot['cartData']['totals']['tax_lines'] ) ) {
+			$tax_lines = $snapshot['cartData']['totals']['tax_lines'];
+		}
+
+		$tax_by_rate = array();
+
+		foreach ( $tax_lines as $tax_line ) {
+			if ( ! is_array( $tax_line ) ) {
+				continue;
+			}
+
+			$rate = $this->parse_store_api_tax_line_rate( $tax_line );
+
+			if ( null === $rate ) {
+				continue;
+			}
+
+			$amount = $this->parse_store_api_amount( $tax_line['price'] ?? $tax_line['total'] ?? 0, $minor_units );
+			$key    = $this->format_tax_rate_key( $rate );
+
+			if ( ! isset( $tax_by_rate[ $key ] ) ) {
+				$tax_by_rate[ $key ] = 0.0;
+			}
+
+			$tax_by_rate[ $key ] += $amount;
+		}
+
+		return $tax_by_rate;
+	}
+
+	/**
+	 * Reconstruct goods totals per VAT rate from a Blocks cart snapshot.
+	 *
+	 * @param array $snapshot Blocks cart snapshot.
+	 * @return array
+	 */
+	private function get_blocks_snapshot_goods_by_tax_rate( array $snapshot ) {
+		$items       = $this->get_blocks_snapshot_items( $snapshot );
+		$minor_units = $this->get_blocks_snapshot_minor_units( $snapshot );
+		$known_rates = array_keys( $this->get_blocks_snapshot_tax_by_rate( $snapshot ) );
+		$goods       = array();
+
+		foreach ( $items as $item ) {
+			if ( ! is_array( $item ) || empty( $item['totals'] ) || ! is_array( $item['totals'] ) ) {
+				continue;
+			}
+
+			$totals = $item['totals'];
+			$amount = $this->parse_store_api_amount( $totals['line_subtotal'] ?? $totals['line_total'] ?? 0, $minor_units );
+			$tax    = $this->parse_store_api_amount( $totals['line_subtotal_tax'] ?? $totals['line_total_tax'] ?? 0, $minor_units );
+
+			if ( $amount <= 0 ) {
+				continue;
+			}
+
+			$rate = $amount > 0 ? $tax / $amount : 0.0;
+			$rate = $this->match_blocks_snapshot_tax_rate( $rate, $known_rates );
+			$key  = $this->format_tax_rate_key( $rate );
+
+			if ( ! isset( $goods[ $key ] ) ) {
+				$goods[ $key ] = array(
+					'amount_ex_vat' => 0.0,
+					'rate'          => $rate,
+				);
+			}
+
+			$goods[ $key ]['amount_ex_vat'] += $amount;
+		}
+
+		return $goods;
+	}
+
+	/**
+	 * Get cart items from a Blocks snapshot.
+	 *
+	 * @param array $snapshot Blocks cart snapshot.
+	 * @return array
+	 */
+	private function get_blocks_snapshot_items( array $snapshot ) {
+		if ( ! empty( $snapshot['cartData']['items'] ) && is_array( $snapshot['cartData']['items'] ) ) {
+			return $snapshot['cartData']['items'];
+		}
+
+		if ( ! empty( $snapshot['items'] ) && is_array( $snapshot['items'] ) ) {
+			return $snapshot['items'];
+		}
+
+		return array();
+	}
+
+	/**
+	 * Match a rounded item tax rate to a known cart tax-line rate.
+	 *
+	 * @param float $item_rate Item rate inferred from rounded item totals.
+	 * @param array $known_rate_keys Known formatted tax-rate keys.
+	 * @return float
+	 */
+	private function match_blocks_snapshot_tax_rate( $item_rate, array $known_rate_keys ) {
+		$item_rate = max( 0.0, (float) $item_rate );
+
+		if ( empty( $known_rate_keys ) ) {
+			return $item_rate;
+		}
+
+		$best_rate = $item_rate;
+		$best_diff = null;
+
+		foreach ( $known_rate_keys as $known_rate_key ) {
+			$known_rate = (float) $known_rate_key;
+			$diff       = abs( $known_rate - $item_rate );
+
+			if ( null === $best_diff || $diff < $best_diff ) {
+				$best_diff = $diff;
+				$best_rate = $known_rate;
+			}
+		}
+
+		return null !== $best_diff && $best_diff <= 0.015 ? $best_rate : $item_rate;
+	}
+
+	/**
+	 * Parse a Store API tax line rate.
+	 *
+	 * @param array $tax_line Tax line.
+	 * @return float|null
+	 */
+	private function parse_store_api_tax_line_rate( array $tax_line ) {
+		foreach ( array( 'rate', 'rate_percent', 'percentage' ) as $key ) {
+			if ( isset( $tax_line[ $key ] ) && is_numeric( $tax_line[ $key ] ) ) {
+				$value = (float) $tax_line[ $key ];
+				return $value > 1 ? $value / 100 : $value;
+			}
+		}
+
+		$label = (string) ( $tax_line['name'] ?? $tax_line['label'] ?? '' );
+
+		if ( preg_match( '/(\d+(?:[\\.,]\d+)?)\s*%/', $label, $matches ) ) {
+			return (float) str_replace( ',', '.', $matches[1] ) / 100;
+		}
+
+		return null;
+	}
+
+	/**
+	 * Recursively collect breakdown metadata from Blocks cart data.
+	 *
+	 * @param mixed $value Value to inspect.
+	 * @param array $candidates Candidate breakdowns.
+	 * @return void
+	 */
+	private function collect_blocks_snapshot_breakdowns( $value, array &$candidates ) {
+		if ( ! is_array( $value ) ) {
+			return;
+		}
+
+		if ( isset( $value['key'] ) && '_wcprsv_breakdown' === $value['key'] && isset( $value['value'] ) ) {
+			$this->add_blocks_breakdown_candidate( $candidates, $value['value'] );
+		}
+
+		if ( isset( $value['_wcprsv_breakdown'] ) ) {
+			$this->add_blocks_breakdown_candidate( $candidates, $value['_wcprsv_breakdown'] );
+		}
+
+		foreach ( $value as $child ) {
+			$this->collect_blocks_snapshot_breakdowns( $child, $candidates );
+		}
+	}
+
+	/**
+	 * Add one Blocks breakdown candidate.
+	 *
+	 * @param array $candidates Candidate breakdowns.
+	 * @param mixed $value Raw breakdown value.
+	 * @return void
+	 */
+	private function add_blocks_breakdown_candidate( array &$candidates, $value ) {
+		if ( is_string( $value ) ) {
+			$decoded = json_decode( $value, true );
+
+			if ( is_array( $decoded ) ) {
+				$value = $decoded;
+			}
+		}
+
+		if ( empty( $value['lines'] ) || ! isset( $value['shipping_including_vat'] ) ) {
+			return;
+		}
+
+		$key = md5( wp_json_encode( $value ) );
+		$candidates[ $key ] = $value;
+	}
+
+	/**
+	 * Combine multiple breakdowns.
+	 *
+	 * @param array $breakdowns Breakdown list.
+	 * @return array
+	 */
+	private function combine_breakdowns( array $breakdowns ) {
+		$combined = array(
+			'shipping_including_vat' => 0.0,
+			'shipping_excluding_vat' => 0.0,
+			'taxes'                  => array(),
+			'lines'                  => array(),
+		);
+
+		foreach ( $breakdowns as $breakdown ) {
+			if ( empty( $breakdown['lines'] ) ) {
+				continue;
+			}
+
+			$combined['shipping_including_vat'] += (float) $breakdown['shipping_including_vat'];
+			$combined['shipping_excluding_vat'] += (float) $breakdown['shipping_excluding_vat'];
+
+			foreach ( $breakdown['taxes'] as $tax_rate_id => $tax_amount ) {
+				if ( ! isset( $combined['taxes'][ $tax_rate_id ] ) ) {
+					$combined['taxes'][ $tax_rate_id ] = 0.0;
+				}
+
+				$combined['taxes'][ $tax_rate_id ] += (float) $tax_amount;
+			}
+
+			foreach ( $breakdown['lines'] as $tax_rate_id => $line ) {
+				if ( ! isset( $combined['lines'][ $tax_rate_id ] ) ) {
+					$combined['lines'][ $tax_rate_id ] = $line;
+					continue;
+				}
+
+				$combined['lines'][ $tax_rate_id ]['goods_amount_ex_vat']    += (float) $line['goods_amount_ex_vat'];
+				$combined['lines'][ $tax_rate_id ]['shipping_excluding_vat'] += (float) $line['shipping_excluding_vat'];
+				$combined['lines'][ $tax_rate_id ]['shipping_vat']           += (float) $line['shipping_vat'];
+				$combined['lines'][ $tax_rate_id ]['shipping_including_vat'] += (float) $line['shipping_including_vat'];
+			}
+		}
+
+		return $combined;
 	}
 
 	/**
@@ -1209,7 +1956,7 @@ class WCPRSV_Plugin {
 	 * @param array $breakdown Pro-rata breakdown.
 	 * @return array
 	 */
-	private function get_frontend_debug_payload( array $breakdown ) {
+	private function get_frontend_debug_payload( array $breakdown, $blocks_snapshot = null ) {
 		return array(
 			'cart'      => WC()->cart ? array(
 				'subtotal'       => WC()->cart->get_subtotal(),
@@ -1220,6 +1967,15 @@ class WCPRSV_Plugin {
 			) : null,
 			'packages'  => WC()->shipping() ? $this->summarize_packages( WC()->shipping()->get_packages() ) : array(),
 			'breakdown' => $breakdown,
+			'language'  => array(
+				'current'     => $this->settings->get_current_language(),
+				'source'      => $this->settings->get_wpml_source_language(),
+				'wpml_active' => has_filter( 'wpml_current_language' ),
+			),
+			'blocks'    => is_array( $blocks_snapshot ) ? array(
+				'shipping_including_vat' => $this->get_blocks_snapshot_shipping_including_vat( $blocks_snapshot ),
+				'candidate_count'        => count( $this->get_blocks_snapshot_breakdown_candidates( $blocks_snapshot ) ),
+			) : null,
 		);
 	}
 
@@ -1228,11 +1984,15 @@ class WCPRSV_Plugin {
 	 *
 	 * @return float
 	 */
-	private function get_current_shipping_including_vat() {
+	private function get_current_shipping_including_vat( $allow_rate_fallback = true ) {
 		$shipping_including_vat = (float) WC()->cart->get_shipping_total() + (float) WC()->cart->get_shipping_tax();
 
 		if ( $shipping_including_vat > 0 ) {
 			return $shipping_including_vat;
+		}
+
+		if ( ! $allow_rate_fallback ) {
+			return 0.0;
 		}
 
 		if ( ! WC()->shipping() || ! WC()->session ) {
@@ -1434,7 +2194,8 @@ class WCPRSV_Plugin {
 		foreach ( $lines as $key => $line ) {
 			$goods_amount = $this->round_money( $line['goods_amount_ex_vat'] );
 			$shipping_ex  = $this->round_money( $line['shipping_excluding_vat'] );
-			$goods_vat    = array_key_exists( (string) $key, $order_goods_tax_by_rate ) ? $order_goods_tax_by_rate[ (string) $key ] : $this->round_money( $goods_amount * $line['vat_rate'] );
+			$goods_vat    = isset( $line['goods_vat'] ) ? $this->round_money( $line['goods_vat'] ) : $this->round_money( $goods_amount * $line['vat_rate'] );
+			$goods_vat    = array_key_exists( (string) $key, $order_goods_tax_by_rate ) ? $order_goods_tax_by_rate[ (string) $key ] : $goods_vat;
 			$shipping_vat = $this->round_money( $line['shipping_vat'] );
 			$total_vat    = $this->round_money( $goods_vat + $shipping_vat );
 			$including    = $this->round_money( $goods_amount + $shipping_ex + $total_vat );
@@ -1577,6 +2338,42 @@ class WCPRSV_Plugin {
 	}
 
 	/**
+	 * Check whether a WP Overnight PDF document type should show a VAT specification.
+	 *
+	 * @param string $document_type PDF document type.
+	 * @return bool
+	 */
+	private function is_supported_pdf_document_type( $document_type ) {
+		return in_array( $this->normalize_pdf_document_type( $document_type ), array( 'invoice', 'credit-note', 'credit-note-refund' ), true );
+	}
+
+	/**
+	 * Check whether a PDF document type is a credit note.
+	 *
+	 * @param string $document_type PDF document type.
+	 * @return bool
+	 */
+	private function is_credit_note_document_type( $document_type ) {
+		return in_array( $this->normalize_pdf_document_type( $document_type ), array( 'credit-note', 'credit-note-refund' ), true );
+	}
+
+	/**
+	 * Normalize a PDF document type for comparisons.
+	 *
+	 * @param string $document_type PDF document type.
+	 * @return string
+	 */
+	private function normalize_pdf_document_type( $document_type ) {
+		$document_type = strtolower( str_replace( '_', '-', (string) $document_type ) );
+
+		if ( in_array( $document_type, array( 'creditnote', 'credit-note', 'credit-note-refund', 'refund' ), true ) ) {
+			return 'refund' === $document_type ? 'credit-note-refund' : 'credit-note';
+		}
+
+		return $document_type;
+	}
+
+	/**
 	 * Get a pro-rata breakdown from order meta or order line items.
 	 *
 	 * @param WC_Order $order Order object.
@@ -1603,6 +2400,87 @@ class WCPRSV_Plugin {
 		}
 
 		return $this->calculator->calculate_from_including_vat( $shipping_incl, $goods_by_tax_rate, wc_get_price_decimals() );
+	}
+
+	/**
+	 * Build a VAT specification for a credit note or refund document.
+	 *
+	 * @param mixed $credit_note Credit note or refund object.
+	 * @return array
+	 */
+	private function get_credit_note_breakdown( $credit_note ) {
+		$goods_by_tax_rate = $this->get_credit_note_goods_by_tax_rate( $credit_note );
+
+		if ( empty( $goods_by_tax_rate ) ) {
+			return array();
+		}
+
+		$shipping_incl = method_exists( $credit_note, 'get_shipping_total' ) && method_exists( $credit_note, 'get_shipping_tax' )
+			? $this->round_money( (float) $credit_note->get_shipping_total() + (float) $credit_note->get_shipping_tax() )
+			: 0.0;
+
+		$absolute_goods = array();
+
+		foreach ( $goods_by_tax_rate as $rate_id => $data ) {
+			$absolute_goods[ $rate_id ] = array(
+				'amount_ex_vat' => abs( (float) $data['amount_ex_vat'] ),
+				'rate'          => (float) $data['rate'],
+			);
+		}
+
+		if ( 0.0 === $shipping_incl ) {
+			$breakdown = $this->build_zero_shipping_breakdown( $absolute_goods );
+		} else {
+			$breakdown = $this->calculator->calculate_from_including_vat( abs( $shipping_incl ), $absolute_goods, wc_get_price_decimals() );
+		}
+
+		if ( empty( $breakdown['lines'] ) ) {
+			return array();
+		}
+
+		$breakdown = $this->negate_breakdown_amounts( $breakdown );
+
+		foreach ( $breakdown['lines'] as $rate_id => &$line ) {
+			if ( isset( $goods_by_tax_rate[ $rate_id ]['goods_vat'] ) ) {
+				$line['goods_vat'] = $this->round_money( $goods_by_tax_rate[ $rate_id ]['goods_vat'] );
+			}
+		}
+		unset( $line );
+
+		return $breakdown;
+	}
+
+	/**
+	 * Negate all monetary values in a breakdown for credit notes.
+	 *
+	 * @param array $breakdown Positive breakdown.
+	 * @return array
+	 */
+	private function negate_breakdown_amounts( array $breakdown ) {
+		foreach ( array( 'shipping_including_vat', 'shipping_excluding_vat' ) as $key ) {
+			if ( isset( $breakdown[ $key ] ) ) {
+				$amount = abs( (float) $breakdown[ $key ] );
+				$breakdown[ $key ] = $amount > 0 ? -1 * $amount : 0.0;
+			}
+		}
+
+		foreach ( $breakdown['taxes'] as &$tax_amount ) {
+			$amount = abs( (float) $tax_amount );
+			$tax_amount = $amount > 0 ? -1 * $amount : 0.0;
+		}
+		unset( $tax_amount );
+
+		foreach ( $breakdown['lines'] as &$line ) {
+			foreach ( array( 'goods_amount_ex_vat', 'shipping_excluding_vat', 'shipping_vat', 'shipping_including_vat', 'unrounded_excluding_vat', 'unrounded_vat', 'unrounded_including_vat' ) as $key ) {
+				if ( isset( $line[ $key ] ) ) {
+					$amount = abs( (float) $line[ $key ] );
+					$line[ $key ] = $amount > 0 ? -1 * $amount : 0.0;
+				}
+			}
+		}
+		unset( $line );
+
+		return $breakdown;
 	}
 
 	/**
@@ -1903,6 +2781,67 @@ class WCPRSV_Plugin {
 	}
 
 	/**
+	 * Group credit note or refund item totals by tax rate ID.
+	 *
+	 * @param mixed $credit_note Credit note or refund object.
+	 * @return array
+	 */
+	private function get_credit_note_goods_by_tax_rate( $credit_note ) {
+		$goods_by_tax_rate = array();
+
+		if ( ! is_object( $credit_note ) || ! method_exists( $credit_note, 'get_items' ) ) {
+			return $goods_by_tax_rate;
+		}
+
+		foreach ( $credit_note->get_items( 'line_item' ) as $item ) {
+			if ( ! is_object( $item ) || ! method_exists( $item, 'get_total' ) || ! method_exists( $item, 'get_taxes' ) ) {
+				continue;
+			}
+
+			$line_total = (float) $item->get_total();
+			$taxes      = $item->get_taxes();
+			$tax_totals = isset( $taxes['total'] ) && is_array( $taxes['total'] ) ? array_filter( $taxes['total'] ) : array();
+
+			if ( empty( $tax_totals ) ) {
+				$this->add_credit_note_goods_amount( $goods_by_tax_rate, '0', 0.0, $line_total, 0.0 );
+				continue;
+			}
+
+			foreach ( $tax_totals as $rate_id => $tax_amount ) {
+				$rate = $this->get_tax_rate_decimal_by_id( $rate_id );
+				$this->add_credit_note_goods_amount( $goods_by_tax_rate, $rate_id, $rate, $line_total, (float) $tax_amount );
+			}
+		}
+
+		return $goods_by_tax_rate;
+	}
+
+	/**
+	 * Add a credit note goods amount to a VAT group.
+	 *
+	 * @param array      $goods_by_tax_rate Goods buckets.
+	 * @param string|int $rate_id Tax rate ID.
+	 * @param float      $rate Decimal tax rate.
+	 * @param float      $amount Goods amount excluding VAT.
+	 * @param float      $goods_vat Goods VAT amount.
+	 * @return void
+	 */
+	private function add_credit_note_goods_amount( array &$goods_by_tax_rate, $rate_id, $rate, $amount, $goods_vat ) {
+		$rate_id = (string) $rate_id;
+
+		if ( ! isset( $goods_by_tax_rate[ $rate_id ] ) ) {
+			$goods_by_tax_rate[ $rate_id ] = array(
+				'amount_ex_vat' => 0.0,
+				'rate'          => (float) $rate,
+				'goods_vat'     => 0.0,
+			);
+		}
+
+		$goods_by_tax_rate[ $rate_id ]['amount_ex_vat'] += (float) $amount;
+		$goods_by_tax_rate[ $rate_id ]['goods_vat']     += (float) $goods_vat;
+	}
+
+	/**
 	 * Get decimal tax rate by WooCommerce tax rate ID.
 	 *
 	 * @param string|int $rate_id Tax rate ID.
@@ -1930,6 +2869,16 @@ class WCPRSV_Plugin {
 	 */
 	private function format_vat_rate( $rate ) {
 		return wc_format_localized_decimal( (float) $rate * 100 ) . '%';
+	}
+
+	/**
+	 * Format a decimal VAT rate into a stable lookup key.
+	 *
+	 * @param float $rate Decimal VAT rate.
+	 * @return string
+	 */
+	private function format_tax_rate_key( $rate ) {
+		return number_format( (float) $rate, 6, '.', '' );
 	}
 
 	/**

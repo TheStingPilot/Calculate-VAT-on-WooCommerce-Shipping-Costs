@@ -48,7 +48,78 @@ Use `9` as the reference VAT rate when your shipping method is currently configu
 
 The plugin shows a compact VAT build-up on the cart and checkout pages. Customers can see the VAT per rate at a glance and open the calculation details for goods excluding VAT, shipping excluding VAT, goods VAT, shipping VAT, and total including VAT.
 
+## Technical Documentation
+
+See `TECHNICAL.md` for a file-by-file and function-by-function explanation of the PHP classes, WooCommerce hooks, Blocks JavaScript, calculation flow, order handling, PDF rendering, debug logging, and WPML behavior.
+
+## WPML Behavior
+
+The plugin uses Dutch as the source language:
+
+```text
+nl
+```
+
+When WPML is active, the current frontend language is read through the `wpml_current_language` filter. The source language can be filtered with `wcprsv_wpml_source_language`, but the admin settings keep the stored source language on Dutch by default.
+
 ## Changelog
+
+### 1.0.9
+
+- Add the PDF VAT specification to WP Overnight credit notes.
+- Preserve negative goods and VAT amounts on credit notes while keeping zero shipping amounts displayed as 0.00.
+
+### 1.0.8
+
+- Add WPML-aware source language handling with Dutch (`nl`) as the fixed source language, matching the Toko Lariso free shipping bar pattern.
+- Add current/source language information to debug output when WPML is active.
+- Load the plugin text domain from `/languages` when translation files are present.
+- Add technical documentation with file-by-file and function-by-function explanations.
+
+### 1.0.7
+
+- Always show the VAT specification on cart and checkout, also for free shipping and pickup.
+- Show zero shipping amounts in the VAT specification when no shipping costs are charged.
+- Fix Blocks refresh logic so the inserted VAT specification can be updated instead of being mistaken for a classic checkout breakdown.
+- Update regression tests for zero-shipping VAT specifications.
+
+### 1.0.6
+
+- Rebuild the Blocks VAT specification from current cart items, shipping totals, and tax lines when shipping-rate metadata is missing.
+- Fix the specification disappearing after switching from pickup/free shipping back to paid shipping.
+- Listen directly to WooCommerce Blocks cart-store changes so the specification refreshes when checkout switches delivery modes.
+- Add regression coverage for paid Blocks shipping after metadata has been lost during checkout updates.
+
+### 1.0.5
+
+- Treat WooCommerce Blocks cart totals as authoritative for the current selected shipping total.
+- Hide the pro-rata shipping VAT specification when Blocks reports zero shipping, even if stale paid shipping-rate metadata is still present.
+- Add a regression test for pickup/free shipping with stale paid Blocks metadata.
+
+### 1.0.4
+
+- Use only the selected WooCommerce Blocks shipping rate when rendering the pro-rata VAT specification.
+- Hide the specification for selected free shipping or pickup rates even when non-selected paid rates still contain plugin metadata.
+- Use WooCommerce Blocks tax-line totals for goods VAT in the display to prevent one-cent differences.
+- Extend local Blocks regression tests for paid shipping, free shipping via coupon/pickup, and tax-line rounding.
+
+### 1.0.3
+
+- Add pro-rata breakdown metadata directly to WooCommerce Blocks Store API shipping-rate output.
+- Make Blocks display less dependent on a separate REST cart reconstruction by letting `wc/store/cart` carry the plugin breakdown.
+- Add local regression coverage for Store API shipping-rate metadata enrichment.
+
+### 1.0.2
+
+- Fix WooCommerce Blocks cart/checkout display when the custom REST endpoint cannot see the WooCommerce server-side cart.
+- Send the WooCommerce Blocks cart-store snapshot to the plugin endpoint and recover the pro-rata breakdown from shipping-rate metadata.
+- Add the WooCommerce Blocks data-store script dependency when available.
+
+### 1.0.1
+
+- Hide the pro-rata shipping VAT specification when the actual cart shipping total is zero, including free shipping via coupons.
+- Recalculate the customer-facing cart/checkout breakdown from the actual current cart shipping total when stored shipping-rate metadata no longer matches the cart total.
+- Remove stale Blocks checkout/cart breakdown markup when the cart changes to free shipping.
 
 ### 1.0.0
 

@@ -16,6 +16,7 @@ class WCPRSV_Settings {
 	const OPTION_ENABLED            = 'wcprsv_enabled';
 	const OPTION_REFERENCE_VAT_RATE = 'wcprsv_reference_vat_rate';
 	const OPTION_DEBUG              = 'wcprsv_debug';
+	const OPTION_WPML_SOURCE_LANGUAGE = 'wcprsv_wpml_source_language';
 
 	/**
 	 * Register settings hooks.
@@ -24,6 +25,7 @@ class WCPRSV_Settings {
 	 */
 	public function init() {
 		add_filter( 'woocommerce_get_settings_tax', array( $this, 'add_tax_settings' ), 20, 2 );
+		add_action( 'woocommerce_update_options_tax', array( $this, 'force_wpml_source_language' ), 20 );
 	}
 
 	/**
@@ -57,6 +59,44 @@ class WCPRSV_Settings {
 	 */
 	public function is_debug_enabled() {
 		return 'yes' === get_option( self::OPTION_DEBUG, 'no' );
+	}
+
+	/**
+	 * Source language used for WPML-aware plugin behavior.
+	 *
+	 * @return string
+	 */
+	public function get_wpml_source_language() {
+		$language = get_option( self::OPTION_WPML_SOURCE_LANGUAGE, 'nl' );
+		$language = apply_filters( 'wcprsv_wpml_source_language', $language );
+
+		return $language ? (string) $language : 'nl';
+	}
+
+	/**
+	 * Current frontend language, falling back to the source language.
+	 *
+	 * @return string
+	 */
+	public function get_current_language() {
+		if ( has_filter( 'wpml_current_language' ) ) {
+			$language = apply_filters( 'wpml_current_language', null );
+
+			if ( $language ) {
+				return (string) $language;
+			}
+		}
+
+		return $this->get_wpml_source_language();
+	}
+
+	/**
+	 * Keep Dutch as the source language, matching the Toko Lariso plugin pattern.
+	 *
+	 * @return void
+	 */
+	public function force_wpml_source_language() {
+		update_option( self::OPTION_WPML_SOURCE_LANGUAGE, 'nl', false );
 	}
 
 	/**
@@ -104,6 +144,20 @@ class WCPRSV_Settings {
 				'default' => 'no',
 				'type'    => 'checkbox',
 				'desc'    => __( 'Log pro-rata shipping VAT calculations to the browser console and WooCommerce logs.', 'wc-pro-rata-shipping-vat' ),
+			),
+			array(
+				'title' => __( 'WPML source language', 'wc-pro-rata-shipping-vat' ),
+				'type'  => 'title',
+				'desc'  => sprintf(
+					/* translators: %s: language code. */
+					__( 'Dutch (%s) is used as the source language for plugin behavior when WPML is active.', 'wc-pro-rata-shipping-vat' ),
+					'nl'
+				),
+				'id'    => 'wcprsv_wpml_options',
+			),
+			array(
+				'type' => 'sectionend',
+				'id'   => 'wcprsv_wpml_options',
 			),
 			array(
 				'type' => 'sectionend',

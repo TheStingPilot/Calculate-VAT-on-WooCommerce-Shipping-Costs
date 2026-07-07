@@ -16,9 +16,19 @@
 	];
 	var isRefreshing = false;
 	var refreshTimer = null;
+	var unsubscribeBlocksStore = null;
+	var lastBlocksSignature = '';
 
 	function hasClassicBreakdown() {
-		return !! document.querySelector( '.wcprsv-vat-breakdown, [data-wcprsv-breakdown]' );
+		var breakdowns = document.querySelectorAll( '.wcprsv-vat-breakdown, [data-wcprsv-breakdown]' );
+
+		for ( var i = 0; i < breakdowns.length; i++ ) {
+			if ( ! breakdowns[ i ].closest( '.wcprsv-block-breakdown' ) ) {
+				return true;
+			}
+		}
+
+		return false;
 	}
 
 	function findTarget() {
@@ -56,6 +66,56 @@
 		target.insertAdjacentElement( 'afterend', wrapper );
 	}
 
+	function removeBlockBreakdown() {
+		var existing = document.querySelector( '.wcprsv-block-breakdown' );
+
+		if ( existing ) {
+			existing.remove();
+		}
+	}
+
+	function getBlocksSnapshot() {
+		if (
+			! window.wp ||
+			! window.wp.data ||
+			! window.wc ||
+			! window.wc.wcBlocksData ||
+			! window.wc.wcBlocksData.cartStore
+		) {
+			return null;
+		}
+
+		var store = window.wp.data.select( window.wc.wcBlocksData.cartStore );
+
+		if ( ! store ) {
+			return null;
+		}
+
+		return {
+			cartData: typeof store.getCartData === 'function' ? store.getCartData() : null,
+			totals: typeof store.getCartTotals === 'function' ? store.getCartTotals() : null,
+			shippingRates: typeof store.getShippingRates === 'function' ? store.getShippingRates() : null
+		};
+	}
+
+	function getBlocksSnapshotSignature( snapshot ) {
+		if ( ! snapshot ) {
+			return '';
+		}
+
+		try {
+			return JSON.stringify( {
+				items: snapshot.cartData && snapshot.cartData.items ? snapshot.cartData.items.map( function ( item ) {
+					return item && item.totals ? item.totals : null;
+				} ) : [],
+				shippingRates: snapshot.shippingRates,
+				totals: snapshot.totals
+			} );
+		} catch ( error ) {
+			return String( Date.now() );
+		}
+	}
+
 	function refresh() {
 		if ( isRefreshing ) {
 			return;
@@ -63,13 +123,18 @@
 
 		isRefreshing = true;
 
+		var snapshot = getBlocksSnapshot();
+
 		window.fetch(
 			window.wcprsvData.endpoint,
 			{
+				method: snapshot ? 'POST' : 'GET',
 				credentials: 'same-origin',
 				headers: {
+					'Content-Type': 'application/json',
 					'X-WP-Nonce': window.wcprsvData.nonce
-				}
+				},
+				body: snapshot ? JSON.stringify( { blocks_snapshot: snapshot } ) : null
 			}
 		)
 			.then( function ( response ) {
@@ -84,6 +149,8 @@
 
 				if ( data && data.has_breakdown && data.html ) {
 					render( data.html );
+				} else {
+					removeBlockBreakdown();
 				}
 			} )
 			.catch( function () {} )
@@ -97,7 +164,34 @@
 		refreshTimer = window.setTimeout( refresh, 350 );
 	}
 
-	document.addEventListener( 'DOMContentLoaded', scheduleRefresh );
+	function watchBlocksStore() {
+		if (
+			unsubscribeBlocksStore ||
+			! window.wp ||
+			! window.wp.data ||
+			typeof window.wp.data.subscribe !== 'function' ||
+			! window.wc ||
+			! window.wc.wcBlocksData ||
+			! window.wc.wcBlocksData.cartStore
+		) {
+			return;
+		}
+
+		unsubscribeBlocksStore = window.wp.data.subscribe( function () {
+			var snapshot = getBlocksSnapshot();
+			var signature = getBlocksSnapshotSignature( snapshot );
+
+			if ( signature && signature !== lastBlocksSignature ) {
+				lastBlocksSignature = signature;
+				scheduleRefresh();
+			}
+		}, window.wc.wcBlocksData.cartStore );
+	}
+
+	document.addEventListener( 'DOMContentLoaded', function () {
+		watchBlocksStore();
+		scheduleRefresh();
+	} );
 	document.body.addEventListener( 'wc-blocks_added_to_cart', scheduleRefresh );
 	document.body.addEventListener( 'wc-blocks_removed_from_cart', scheduleRefresh );
 	document.body.addEventListener( 'wc-blocks_updated_cart_totals', scheduleRefresh );
