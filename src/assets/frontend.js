@@ -17,13 +17,14 @@
 	var isRefreshing = false;
 	var refreshTimer = null;
 	var unsubscribeBlocksStore = null;
+	var domObserver = null;
 	var lastBlocksSignature = '';
 
 	function hasClassicBreakdown() {
 		var breakdowns = document.querySelectorAll( '.wcprsv-vat-breakdown, [data-wcprsv-breakdown]' );
 
 		for ( var i = 0; i < breakdowns.length; i++ ) {
-			if ( ! breakdowns[ i ].closest( '.wcprsv-block-breakdown' ) ) {
+			if ( isVisible( breakdowns[ i ] ) && ! breakdowns[ i ].closest( '.wcprsv-block-breakdown' ) ) {
 				return true;
 			}
 		}
@@ -31,12 +32,84 @@
 		return false;
 	}
 
-	function findTarget() {
+	function isVisible( element ) {
+		return !! (
+			element &&
+			(
+				element.offsetWidth ||
+				element.offsetHeight ||
+				( typeof element.getClientRects === 'function' && element.getClientRects().length )
+			)
+		);
+	}
+
+	function findPlacementInContainer( container ) {
+		var shipping = container.querySelector( '.wc-block-components-totals-shipping' );
+
+		if ( isVisible( shipping ) ) {
+			return {
+				element: shipping,
+				position: 'afterend'
+			};
+		}
+
+		var footer = container.querySelector( '.wc-block-components-totals-footer-item' );
+
+		if ( isVisible( footer ) ) {
+			return {
+				element: footer,
+				position: 'beforebegin'
+			};
+		}
+
+		var totals = container.querySelectorAll( '.wc-block-components-totals-item, .wc-block-components-totals-wrapper' );
+
+		for ( var i = totals.length - 1; i >= 0; i-- ) {
+			if ( isVisible( totals[ i ] ) ) {
+				return {
+					element: totals[ i ],
+					position: 'beforebegin'
+				};
+			}
+		}
+
+		return null;
+	}
+
+	function findPlacement() {
+		var containers = [
+			'.wp-block-woocommerce-checkout-order-summary-block',
+			'.wp-block-woocommerce-cart-order-summary-block',
+			'.wc-block-checkout__sidebar',
+			'.wc-block-cart__sidebar',
+			'.wc-block-components-sidebar',
+			'.woocommerce-checkout-review-order',
+			'.cart_totals'
+		];
+		var placement;
+
+		for ( var j = 0; j < containers.length; j++ ) {
+			var container = document.querySelector( containers[ j ] );
+
+			if ( ! isVisible( container ) ) {
+				continue;
+			}
+
+			placement = findPlacementInContainer( container );
+
+			if ( placement ) {
+				return placement;
+			}
+		}
+
 		for ( var i = 0; i < targetSelectors.length; i++ ) {
 			var target = document.querySelector( targetSelectors[ i ] );
 
-			if ( target ) {
-				return target;
+			if ( isVisible( target ) ) {
+				return {
+					element: target,
+					position: target.matches( '.wc-block-components-totals-footer-item' ) ? 'beforebegin' : 'afterend'
+				};
 			}
 		}
 
@@ -48,9 +121,9 @@
 			return;
 		}
 
-		var target = findTarget();
+		var placement = findPlacement();
 
-		if ( ! target ) {
+		if ( ! placement ) {
 			return;
 		}
 
@@ -63,7 +136,7 @@
 		var wrapper = document.createElement( 'div' );
 		wrapper.className = 'wcprsv-block-breakdown';
 		wrapper.innerHTML = html;
-		target.insertAdjacentElement( 'afterend', wrapper );
+		placement.element.insertAdjacentElement( placement.position, wrapper );
 	}
 
 	function removeBlockBreakdown() {
@@ -164,6 +237,26 @@
 		refreshTimer = window.setTimeout( refresh, 350 );
 	}
 
+	function watchDomChanges() {
+		if ( domObserver || typeof window.MutationObserver !== 'function' ) {
+			return;
+		}
+
+		domObserver = new window.MutationObserver( function () {
+			if ( ! document.querySelector( '.wcprsv-block-breakdown' ) ) {
+				scheduleRefresh();
+			}
+		} );
+
+		domObserver.observe(
+			document.body,
+			{
+				childList: true,
+				subtree: true
+			}
+		);
+	}
+
 	function watchBlocksStore() {
 		if (
 			unsubscribeBlocksStore ||
@@ -190,8 +283,11 @@
 
 	document.addEventListener( 'DOMContentLoaded', function () {
 		watchBlocksStore();
+		watchDomChanges();
 		scheduleRefresh();
 	} );
+	window.addEventListener( 'resize', scheduleRefresh );
+	window.addEventListener( 'orientationchange', scheduleRefresh );
 	document.body.addEventListener( 'wc-blocks_added_to_cart', scheduleRefresh );
 	document.body.addEventListener( 'wc-blocks_removed_from_cart', scheduleRefresh );
 	document.body.addEventListener( 'wc-blocks_updated_cart_totals', scheduleRefresh );

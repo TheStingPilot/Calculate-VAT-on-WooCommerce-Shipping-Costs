@@ -64,6 +64,20 @@ When WPML is active, the current frontend language is read through the `wpml_cur
 
 ## Changelog
 
+### 1.0.17
+
+- Use consistent `excl. VAT` wording for goods and shipping columns in the PDF VAT specification.
+
+### 1.0.16
+
+- Ignore hidden classic checkout breakdown markup when deciding whether Blocks rendering is needed.
+- Place the VAT specification before the visible Total row when WooCommerce Blocks mobile checkout does not expose a visible shipping target.
+
+### 1.0.15
+
+- Reinsert the VAT specification after WooCommerce Blocks replaces the mobile checkout order summary during resize or responsive layout changes.
+- Prefer visible cart and checkout summary containers when choosing where to place the VAT specification.
+
 ### 1.0.14
 
 - Limit the single and double underline in the expanded VAT calculation to the final amount only.

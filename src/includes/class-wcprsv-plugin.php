@@ -2162,8 +2162,8 @@ class WCPRSV_Plugin {
 				<thead>
 					<tr>
 						<th style="border-bottom: 1px solid #999; text-align: left;"><?php echo esc_html__( 'Rate', 'wc-pro-rata-shipping-vat' ); ?></th>
-						<th style="border-bottom: 1px solid #999; text-align: right;"><?php echo esc_html__( 'Goods ex. VAT', 'wc-pro-rata-shipping-vat' ); ?></th>
-						<th style="border-bottom: 1px solid #999; text-align: right;"><?php echo esc_html__( 'Shipping ex. VAT', 'wc-pro-rata-shipping-vat' ); ?></th>
+						<th style="border-bottom: 1px solid #999; text-align: right;"><?php echo esc_html__( 'Goods excl. VAT', 'wc-pro-rata-shipping-vat' ); ?></th>
+						<th style="border-bottom: 1px solid #999; text-align: right;"><?php echo esc_html__( 'Shipping excl. VAT', 'wc-pro-rata-shipping-vat' ); ?></th>
 						<th style="border-bottom: 1px solid #999; text-align: right;"><?php echo esc_html__( 'Goods VAT', 'wc-pro-rata-shipping-vat' ); ?></th>
 						<th style="border-bottom: 1px solid #999; text-align: right;"><?php echo esc_html__( 'Shipping VAT', 'wc-pro-rata-shipping-vat' ); ?></th>
 						<th style="border-bottom: 1px solid #999; text-align: right;"><?php echo esc_html__( 'Incl. VAT', 'wc-pro-rata-shipping-vat' ); ?></th>
