@@ -77,6 +77,7 @@ class WCPRSV_Plugin {
 		add_action( 'wp_enqueue_scripts', array( $this, 'enqueue_frontend_assets' ) );
 		add_action( 'rest_api_init', array( $this, 'register_storefront_endpoint' ) );
 		add_action( 'admin_menu', array( $this, 'register_admin_menu' ) );
+		add_action( 'admin_init', array( $this, 'sync_wpml_string_source_language' ) );
 	}
 
 	/**
@@ -90,6 +91,48 @@ class WCPRSV_Plugin {
 			false,
 			dirname( plugin_basename( WCPRSV_FILE ) ) . '/languages'
 		);
+	}
+
+	/**
+	 * Mark this plugin's WPML String Translation strings as English source strings.
+	 *
+	 * WPML scans gettext strings as English by default. This plugin is authored
+	 * with English customer-facing strings, so existing WPML string records for
+	 * this text domain need their source language set to English.
+	 *
+	 * @return void
+	 */
+	public function sync_wpml_string_source_language() {
+		if ( ! is_admin() || ! $this->is_wpml_string_translation_available() ) {
+			return;
+		}
+
+		global $wpdb;
+
+		$table = $wpdb->prefix . 'icl_strings';
+
+		if ( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $table ) ) !== $table ) {
+			return;
+		}
+
+		$source_language = $this->settings->get_wpml_source_language();
+
+		$wpdb->update(
+			$table,
+			array( 'language' => $source_language ),
+			array( 'context' => 'wc-pro-rata-shipping-vat' ),
+			array( '%s' ),
+			array( '%s' )
+		);
+	}
+
+	/**
+	 * Check whether WPML String Translation appears to be active.
+	 *
+	 * @return bool
+	 */
+	private function is_wpml_string_translation_available() {
+		return has_action( 'wpml_register_single_string' ) || has_filter( 'wpml_translate_single_string' ) || defined( 'WPML_ST_VERSION' );
 	}
 
 	/**
@@ -627,8 +670,8 @@ class WCPRSV_Plugin {
 	public function register_admin_menu() {
 		add_submenu_page(
 			'woocommerce',
-			__( 'Pro-rata verzend-BTW', 'wc-pro-rata-shipping-vat' ),
-			__( 'Pro-rata verzend-BTW', 'wc-pro-rata-shipping-vat' ),
+			__( 'Pro-rata shipping VAT', 'wc-pro-rata-shipping-vat' ),
+			__( 'Pro-rata shipping VAT', 'wc-pro-rata-shipping-vat' ),
 			'manage_woocommerce',
 			'wcprsv-maintenance',
 			array( $this, 'render_maintenance_page' )
@@ -662,7 +705,7 @@ class WCPRSV_Plugin {
 				if ( ! $order ) {
 					$results[] = array(
 						'order_id' => $order_id,
-						'status'   => __( 'Niet gevonden', 'wc-pro-rata-shipping-vat' ),
+						'status'   => __( 'Not found', 'wc-pro-rata-shipping-vat' ),
 					);
 					continue;
 				}
@@ -677,31 +720,31 @@ class WCPRSV_Plugin {
 			}
 
 			$notice = 'recalculate' === $action
-				? __( 'Herberekening afgerond.', 'wc-pro-rata-shipping-vat' )
-				: __( 'Analyse afgerond.', 'wc-pro-rata-shipping-vat' );
+				? __( 'Recalculation completed.', 'wc-pro-rata-shipping-vat' )
+				: __( 'Analysis completed.', 'wc-pro-rata-shipping-vat' );
 		}
 
 		?>
 		<div class="wrap">
-			<h1><?php echo esc_html__( 'Pro-rata verzend-BTW onderhoud', 'wc-pro-rata-shipping-vat' ); ?></h1>
+			<h1><?php echo esc_html__( 'Pro-rata shipping VAT maintenance', 'wc-pro-rata-shipping-vat' ); ?></h1>
 			<?php if ( $notice ) : ?>
 				<div class="notice notice-success"><p><?php echo esc_html( $notice ); ?></p></div>
 			<?php endif; ?>
-			<p><?php echo esc_html__( 'Analyseer of herbereken bestaande WooCommerce orders. De boekhouding wordt niet opnieuw geëxporteerd; deze actie past alleen de WooCommerce orderdata aan.', 'wc-pro-rata-shipping-vat' ); ?></p>
+			<p><?php echo esc_html__( 'Analyze or recalculate existing WooCommerce orders. Accounting exports are not sent again; this action only updates WooCommerce order data.', 'wc-pro-rata-shipping-vat' ); ?></p>
 			<form method="post">
 				<?php wp_nonce_field( 'wcprsv_maintenance' ); ?>
 				<table class="form-table" role="presentation">
 					<tr>
-						<th scope="row"><label for="wcprsv_order_ids"><?php echo esc_html__( 'Ordernummers', 'wc-pro-rata-shipping-vat' ); ?></label></th>
+						<th scope="row"><label for="wcprsv_order_ids"><?php echo esc_html__( 'Order numbers', 'wc-pro-rata-shipping-vat' ); ?></label></th>
 						<td>
 							<textarea id="wcprsv_order_ids" name="wcprsv_order_ids" rows="4" class="large-text" placeholder="33210, 33211"><?php echo esc_textarea( $ids ); ?></textarea>
-							<p class="description"><?php echo esc_html__( 'Gebruik komma’s, spaties of nieuwe regels om meerdere orders op te geven.', 'wc-pro-rata-shipping-vat' ); ?></p>
+							<p class="description"><?php echo esc_html__( 'Use commas, spaces, or new lines to enter multiple orders.', 'wc-pro-rata-shipping-vat' ); ?></p>
 						</td>
 					</tr>
 				</table>
 				<p class="submit">
-					<button class="button button-secondary" type="submit" name="wcprsv_action" value="analyze"><?php echo esc_html__( 'Analyseer', 'wc-pro-rata-shipping-vat' ); ?></button>
-					<button class="button button-primary" type="submit" name="wcprsv_action" value="recalculate" onclick="return confirm('<?php echo esc_js( __( 'Weet je zeker dat je de geselecteerde orders wilt herberekenen?', 'wc-pro-rata-shipping-vat' ) ); ?>');"><?php echo esc_html__( 'Herbereken orders', 'wc-pro-rata-shipping-vat' ); ?></button>
+					<button class="button button-secondary" type="submit" name="wcprsv_action" value="analyze"><?php echo esc_html__( 'Analyze', 'wc-pro-rata-shipping-vat' ); ?></button>
+					<button class="button button-primary" type="submit" name="wcprsv_action" value="recalculate" onclick="return confirm('<?php echo esc_js( __( 'Are you sure you want to recalculate the selected orders?', 'wc-pro-rata-shipping-vat' ) ); ?>');"><?php echo esc_html__( 'Recalculate orders', 'wc-pro-rata-shipping-vat' ); ?></button>
 				</p>
 			</form>
 			<?php $this->render_maintenance_results( $results ); ?>
@@ -745,16 +788,16 @@ class WCPRSV_Plugin {
 		);
 
 		if ( empty( $goods_by_tax_rate ) || $shipping_incl <= 0 ) {
-			$result['status'] = __( 'Niet ondersteund', 'wc-pro-rata-shipping-vat' );
-			$result['error']  = __( 'Geen belastbare goederen of verzendkosten gevonden.', 'wc-pro-rata-shipping-vat' );
+			$result['status'] = __( 'Not supported', 'wc-pro-rata-shipping-vat' );
+			$result['error']  = __( 'No taxable goods or shipping costs found.', 'wc-pro-rata-shipping-vat' );
 			return $result;
 		}
 
 		$breakdown = $this->calculator->calculate_from_including_vat( $shipping_incl, $goods_by_tax_rate, wc_get_price_decimals() );
 
 		if ( empty( $breakdown['lines'] ) ) {
-			$result['status'] = __( 'Niet ondersteund', 'wc-pro-rata-shipping-vat' );
-			$result['error']  = __( 'Geen BTW-specificatie te berekenen.', 'wc-pro-rata-shipping-vat' );
+			$result['status'] = __( 'Not supported', 'wc-pro-rata-shipping-vat' );
+			$result['error']  = __( 'No VAT specification can be calculated.', 'wc-pro-rata-shipping-vat' );
 			return $result;
 		}
 
@@ -765,7 +808,7 @@ class WCPRSV_Plugin {
 		$result['new_shipping_tax'] = $new_shipping_tax;
 		$result['difference']   = $this->round_money( $expected_total - (float) $order->get_total() );
 		$result['breakdown']    = $breakdown;
-		$result['status']       = 0.0 === $result['difference'] && $result['current_shipping_tax'] === $new_shipping_tax ? __( 'OK', 'wc-pro-rata-shipping-vat' ) : __( 'Afwijking', 'wc-pro-rata-shipping-vat' );
+		$result['status']       = 0.0 === $result['difference'] && $result['current_shipping_tax'] === $new_shipping_tax ? __( 'OK', 'wc-pro-rata-shipping-vat' ) : __( 'Difference', 'wc-pro-rata-shipping-vat' );
 
 		return $result;
 	}
@@ -780,7 +823,7 @@ class WCPRSV_Plugin {
 		$current_amount = $this->round_money( (float) $order->get_shipping_total() + (float) $order->get_shipping_tax() );
 		$best           = array(
 			'amount' => $current_amount,
-			'source' => __( 'Huidige order', 'wc-pro-rata-shipping-vat' ),
+			'source' => __( 'Current order', 'wc-pro-rata-shipping-vat' ),
 		);
 
 		foreach ( $this->get_stored_order_breakdown_candidates( $order ) as $candidate ) {
@@ -811,20 +854,20 @@ class WCPRSV_Plugin {
 		$candidates = array();
 
 		$this->add_breakdown_candidate( $candidates, $order->get_meta( '_wcprsv_breakdown' ), __( 'Order meta', 'wc-pro-rata-shipping-vat' ) );
-		$this->add_breakdown_candidate( $candidates, $order->get_meta( '_wcprsv_previous_breakdown' ), __( 'Vorige breakdown', 'wc-pro-rata-shipping-vat' ) );
+		$this->add_breakdown_candidate( $candidates, $order->get_meta( '_wcprsv_previous_breakdown' ), __( 'Previous breakdown', 'wc-pro-rata-shipping-vat' ) );
 
 		$history = $order->get_meta( '_wcprsv_recalculation_history' );
 
 		if ( is_array( $history ) ) {
 			foreach ( $history as $entry ) {
 				if ( ! empty( $entry['breakdown'] ) ) {
-					$this->add_breakdown_candidate( $candidates, $entry['breakdown'], __( 'Historie', 'wc-pro-rata-shipping-vat' ) );
+					$this->add_breakdown_candidate( $candidates, $entry['breakdown'], __( 'History', 'wc-pro-rata-shipping-vat' ) );
 				}
 			}
 		}
 
 		foreach ( $order->get_items( 'shipping' ) as $item ) {
-			$this->add_breakdown_candidate( $candidates, $item->get_meta( '_wcprsv_breakdown' ), __( 'Verzendregel meta', 'wc-pro-rata-shipping-vat' ) );
+			$this->add_breakdown_candidate( $candidates, $item->get_meta( '_wcprsv_breakdown' ), __( 'Shipping item meta', 'wc-pro-rata-shipping-vat' ) );
 		}
 
 		return $candidates;
@@ -889,7 +932,7 @@ class WCPRSV_Plugin {
 		$order->save();
 
 		$updated = $this->analyze_order_recalculation( $order );
-		$updated['status'] = __( 'Herberekend', 'wc-pro-rata-shipping-vat' );
+		$updated['status'] = __( 'Recalculated', 'wc-pro-rata-shipping-vat' );
 
 		return $updated;
 	}
@@ -906,18 +949,18 @@ class WCPRSV_Plugin {
 		}
 
 		?>
-		<h2><?php echo esc_html__( 'Resultaten', 'wc-pro-rata-shipping-vat' ); ?></h2>
+		<h2><?php echo esc_html__( 'Results', 'wc-pro-rata-shipping-vat' ); ?></h2>
 		<table class="widefat striped">
 			<thead>
 				<tr>
 					<th><?php echo esc_html__( 'Order', 'wc-pro-rata-shipping-vat' ); ?></th>
-					<th><?php echo esc_html__( 'Datum', 'wc-pro-rata-shipping-vat' ); ?></th>
+					<th><?php echo esc_html__( 'Date', 'wc-pro-rata-shipping-vat' ); ?></th>
 					<th><?php echo esc_html__( 'Status', 'wc-pro-rata-shipping-vat' ); ?></th>
-					<th><?php echo esc_html__( 'Huidig totaal', 'wc-pro-rata-shipping-vat' ); ?></th>
-					<th><?php echo esc_html__( 'Nieuw totaal', 'wc-pro-rata-shipping-vat' ); ?></th>
-					<th><?php echo esc_html__( 'Verschil', 'wc-pro-rata-shipping-vat' ); ?></th>
-					<th><?php echo esc_html__( 'Verzend-BTW', 'wc-pro-rata-shipping-vat' ); ?></th>
-					<th><?php echo esc_html__( 'Bron', 'wc-pro-rata-shipping-vat' ); ?></th>
+					<th><?php echo esc_html__( 'Current total', 'wc-pro-rata-shipping-vat' ); ?></th>
+					<th><?php echo esc_html__( 'New total', 'wc-pro-rata-shipping-vat' ); ?></th>
+					<th><?php echo esc_html__( 'Difference', 'wc-pro-rata-shipping-vat' ); ?></th>
+					<th><?php echo esc_html__( 'Shipping VAT', 'wc-pro-rata-shipping-vat' ); ?></th>
+					<th><?php echo esc_html__( 'Source', 'wc-pro-rata-shipping-vat' ); ?></th>
 				</tr>
 			</thead>
 			<tbody>
@@ -2040,14 +2083,14 @@ class WCPRSV_Plugin {
 		ob_start();
 		?>
 		<div class="wcprsv-breakdown" data-wcprsv-breakdown="1">
-			<div class="wcprsv-breakdown__title"><?php echo esc_html__( 'BTW-specificatie', 'wc-pro-rata-shipping-vat' ); ?></div>
+			<div class="wcprsv-breakdown__title"><?php echo esc_html__( 'VAT specification', 'wc-pro-rata-shipping-vat' ); ?></div>
 
-			<div class="wcprsv-summary" role="table" aria-label="<?php echo esc_attr__( 'BTW-specificatie', 'wc-pro-rata-shipping-vat' ); ?>">
+			<div class="wcprsv-summary" role="table" aria-label="<?php echo esc_attr__( 'VAT specification', 'wc-pro-rata-shipping-vat' ); ?>">
 				<div class="wcprsv-summary__row wcprsv-summary__row--head" role="row">
-					<div role="columnheader"><?php echo esc_html__( 'Tarief', 'wc-pro-rata-shipping-vat' ); ?></div>
-					<div role="columnheader"><?php echo esc_html__( 'Goederen', 'wc-pro-rata-shipping-vat' ); ?></div>
-					<div role="columnheader"><?php echo esc_html__( 'Verzending', 'wc-pro-rata-shipping-vat' ); ?></div>
-					<div role="columnheader"><?php echo esc_html__( 'BTW', 'wc-pro-rata-shipping-vat' ); ?></div>
+					<div role="columnheader"><?php echo esc_html__( 'Rate', 'wc-pro-rata-shipping-vat' ); ?></div>
+					<div role="columnheader"><?php echo esc_html__( 'Goods', 'wc-pro-rata-shipping-vat' ); ?></div>
+					<div role="columnheader"><?php echo esc_html__( 'Shipping', 'wc-pro-rata-shipping-vat' ); ?></div>
+					<div role="columnheader"><?php echo esc_html__( 'VAT', 'wc-pro-rata-shipping-vat' ); ?></div>
 				</div>
 				<?php foreach ( $display_lines as $line ) : ?>
 					<div class="wcprsv-summary__row" role="row">
@@ -2061,30 +2104,30 @@ class WCPRSV_Plugin {
 
 			<div class="wcprsv-totals">
 				<div class="wcprsv-totals__row">
-					<span><?php echo esc_html__( 'Totaal excl. BTW', 'wc-pro-rata-shipping-vat' ); ?></span>
+					<span><?php echo esc_html__( 'Total excl. VAT', 'wc-pro-rata-shipping-vat' ); ?></span>
 					<strong><?php echo wp_kses_post( wc_price( $total_excluding ) ); ?></strong>
 				</div>
 				<div class="wcprsv-totals__row">
-					<span><?php echo esc_html__( 'Totaal BTW', 'wc-pro-rata-shipping-vat' ); ?></span>
+					<span><?php echo esc_html__( 'Total VAT', 'wc-pro-rata-shipping-vat' ); ?></span>
 					<strong><?php echo wp_kses_post( wc_price( $total_vat ) ); ?></strong>
 				</div>
 				<div class="wcprsv-totals__row wcprsv-totals__row--grand">
-					<span><?php echo esc_html__( 'Totaal incl. BTW', 'wc-pro-rata-shipping-vat' ); ?></span>
+					<span><?php echo esc_html__( 'Total incl. VAT', 'wc-pro-rata-shipping-vat' ); ?></span>
 					<strong><?php echo wp_kses_post( wc_price( $total_including ) ); ?></strong>
 				</div>
 			</div>
 
 			<details class="wcprsv-details">
-				<summary><?php echo esc_html__( 'Toon berekening', 'wc-pro-rata-shipping-vat' ); ?></summary>
+				<summary><?php echo esc_html__( 'Show calculation', 'wc-pro-rata-shipping-vat' ); ?></summary>
 				<div class="wcprsv-detail-lines">
 					<?php foreach ( $display_lines as $line ) : ?>
 						<div class="wcprsv-detail-line">
 							<div class="wcprsv-detail-line__title"><?php echo esc_html( $this->format_vat_rate( $line['vat_rate'] ) ); ?></div>
-							<div><span><?php echo esc_html__( 'Goederen excl. BTW', 'wc-pro-rata-shipping-vat' ); ?></span><strong><?php echo wp_kses_post( wc_price( $line['goods_amount_ex_vat'] ) ); ?></strong></div>
-							<div><span><?php echo esc_html__( 'Verzending excl. BTW', 'wc-pro-rata-shipping-vat' ); ?></span><strong><?php echo wp_kses_post( wc_price( $line['shipping_excluding_vat'] ) ); ?></strong></div>
-							<div><span><?php echo esc_html__( 'BTW goederen', 'wc-pro-rata-shipping-vat' ); ?></span><strong><?php echo wp_kses_post( wc_price( $line['goods_vat'] ) ); ?></strong></div>
-							<div><span><?php echo esc_html__( 'BTW verzending', 'wc-pro-rata-shipping-vat' ); ?></span><strong><?php echo wp_kses_post( wc_price( $line['shipping_vat'] ) ); ?></strong></div>
-							<div><span><?php echo esc_html__( 'Incl. BTW', 'wc-pro-rata-shipping-vat' ); ?></span><strong><?php echo wp_kses_post( wc_price( $line['including_vat'] ) ); ?></strong></div>
+							<div><span><?php echo esc_html__( 'Goods excl. VAT', 'wc-pro-rata-shipping-vat' ); ?></span><strong><?php echo wp_kses_post( wc_price( $line['goods_amount_ex_vat'] ) ); ?></strong></div>
+							<div><span><?php echo esc_html__( 'Shipping excl. VAT', 'wc-pro-rata-shipping-vat' ); ?></span><strong><?php echo wp_kses_post( wc_price( $line['shipping_excluding_vat'] ) ); ?></strong></div>
+							<div><span><?php echo esc_html__( 'Goods VAT', 'wc-pro-rata-shipping-vat' ); ?></span><strong><?php echo wp_kses_post( wc_price( $line['goods_vat'] ) ); ?></strong></div>
+							<div><span><?php echo esc_html__( 'Shipping VAT', 'wc-pro-rata-shipping-vat' ); ?></span><strong><?php echo wp_kses_post( wc_price( $line['shipping_vat'] ) ); ?></strong></div>
+							<div><span><?php echo esc_html__( 'Incl. VAT', 'wc-pro-rata-shipping-vat' ); ?></span><strong><?php echo wp_kses_post( wc_price( $line['including_vat'] ) ); ?></strong></div>
 						</div>
 					<?php endforeach; ?>
 				</div>
@@ -2114,16 +2157,16 @@ class WCPRSV_Plugin {
 		ob_start();
 		?>
 		<div class="wcprsv-pdf-breakdown" style="margin-top: 18px;">
-			<h3 style="margin: 0 0 8px;"><?php echo esc_html__( 'BTW-specificatie', 'wc-pro-rata-shipping-vat' ); ?></h3>
+			<h3 style="margin: 0 0 8px;"><?php echo esc_html__( 'VAT specification', 'wc-pro-rata-shipping-vat' ); ?></h3>
 			<table style="width: 100%; border-collapse: collapse; font-size: 10px;">
 				<thead>
 					<tr>
-						<th style="border-bottom: 1px solid #999; text-align: left;"><?php echo esc_html__( 'Tarief', 'wc-pro-rata-shipping-vat' ); ?></th>
-						<th style="border-bottom: 1px solid #999; text-align: right;"><?php echo esc_html__( 'Goederen ex. BTW', 'wc-pro-rata-shipping-vat' ); ?></th>
-						<th style="border-bottom: 1px solid #999; text-align: right;"><?php echo esc_html__( 'Verzending ex. BTW', 'wc-pro-rata-shipping-vat' ); ?></th>
-						<th style="border-bottom: 1px solid #999; text-align: right;"><?php echo esc_html__( 'BTW goederen', 'wc-pro-rata-shipping-vat' ); ?></th>
-						<th style="border-bottom: 1px solid #999; text-align: right;"><?php echo esc_html__( 'BTW verzending', 'wc-pro-rata-shipping-vat' ); ?></th>
-						<th style="border-bottom: 1px solid #999; text-align: right;"><?php echo esc_html__( 'Incl. BTW', 'wc-pro-rata-shipping-vat' ); ?></th>
+						<th style="border-bottom: 1px solid #999; text-align: left;"><?php echo esc_html__( 'Rate', 'wc-pro-rata-shipping-vat' ); ?></th>
+						<th style="border-bottom: 1px solid #999; text-align: right;"><?php echo esc_html__( 'Goods ex. VAT', 'wc-pro-rata-shipping-vat' ); ?></th>
+						<th style="border-bottom: 1px solid #999; text-align: right;"><?php echo esc_html__( 'Shipping ex. VAT', 'wc-pro-rata-shipping-vat' ); ?></th>
+						<th style="border-bottom: 1px solid #999; text-align: right;"><?php echo esc_html__( 'Goods VAT', 'wc-pro-rata-shipping-vat' ); ?></th>
+						<th style="border-bottom: 1px solid #999; text-align: right;"><?php echo esc_html__( 'Shipping VAT', 'wc-pro-rata-shipping-vat' ); ?></th>
+						<th style="border-bottom: 1px solid #999; text-align: right;"><?php echo esc_html__( 'Incl. VAT', 'wc-pro-rata-shipping-vat' ); ?></th>
 					</tr>
 				</thead>
 				<tbody>
@@ -2140,7 +2183,7 @@ class WCPRSV_Plugin {
 				</tbody>
 				<tfoot>
 					<tr>
-						<th style="border-top: 1px solid #999; padding-top: 5px; text-align: left;"><?php echo esc_html__( 'Totaal', 'wc-pro-rata-shipping-vat' ); ?></th>
+						<th style="border-top: 1px solid #999; padding-top: 5px; text-align: left;"><?php echo esc_html__( 'Total', 'wc-pro-rata-shipping-vat' ); ?></th>
 						<th style="border-top: 1px solid #999; padding-top: 5px; text-align: right;"><?php echo wp_kses_post( wc_price( $goods_total ) ); ?></th>
 						<th style="border-top: 1px solid #999; padding-top: 5px; text-align: right;"><?php echo wp_kses_post( wc_price( $shipping_total ) ); ?></th>
 						<th style="border-top: 1px solid #999; padding-top: 5px; text-align: right;"><?php echo wp_kses_post( wc_price( $goods_vat_total ) ); ?></th>
@@ -2148,11 +2191,11 @@ class WCPRSV_Plugin {
 						<th style="border-top: 1px solid #999; padding-top: 5px; text-align: right;"><?php echo wp_kses_post( wc_price( $total_including ) ); ?></th>
 					</tr>
 					<tr>
-						<td colspan="5" style="padding-top: 5px; text-align: right;"><?php echo esc_html__( 'Totaal excl. BTW', 'wc-pro-rata-shipping-vat' ); ?></td>
+						<td colspan="5" style="padding-top: 5px; text-align: right;"><?php echo esc_html__( 'Total excl. VAT', 'wc-pro-rata-shipping-vat' ); ?></td>
 						<td style="padding-top: 5px; text-align: right;"><?php echo wp_kses_post( wc_price( $total_excluding ) ); ?></td>
 					</tr>
 					<tr>
-						<td colspan="5" style="text-align: right;"><?php echo esc_html__( 'Totaal BTW', 'wc-pro-rata-shipping-vat' ); ?></td>
+						<td colspan="5" style="text-align: right;"><?php echo esc_html__( 'Total VAT', 'wc-pro-rata-shipping-vat' ); ?></td>
 						<td style="text-align: right;"><?php echo wp_kses_post( wc_price( $total_vat ) ); ?></td>
 					</tr>
 				</tfoot>
@@ -2274,6 +2317,37 @@ class WCPRSV_Plugin {
 			);
 		}
 
+		$target_total_vat = is_a( $order, 'WC_Order' ) ? 0.0 : $this->get_cart_tax_total();
+
+		if ( $target_total_vat > 0 ) {
+			$current_total_vat = $this->round_money(
+				$this->sum_display_column( $display_lines, 'goods_vat' ) + $this->sum_display_column( $display_lines, 'shipping_vat' )
+			);
+			$total_vat_difference = $this->round_money( $target_total_vat - $current_total_vat );
+
+			if ( 0.0 !== $total_vat_difference ) {
+				$display_lines[ $largest_key ]['goods_vat'] = $this->round_money(
+					$display_lines[ $largest_key ]['goods_vat'] + $total_vat_difference
+				);
+			}
+		}
+
+		if ( $cart_total_including > 0 ) {
+			$current_including_total = 0.0;
+
+			foreach ( $display_lines as $line ) {
+				$current_including_total += (float) $line['goods_amount_ex_vat'] + (float) $line['shipping_excluding_vat'] + (float) $line['goods_vat'] + (float) $line['shipping_vat'];
+			}
+
+			$including_difference = $this->round_money( $cart_total_including - $current_including_total );
+
+			if ( 0.0 !== $including_difference ) {
+				$display_lines[ $largest_key ]['goods_amount_ex_vat'] = $this->round_money(
+					$display_lines[ $largest_key ]['goods_amount_ex_vat'] + $including_difference
+				);
+			}
+		}
+
 		foreach ( $display_lines as &$line ) {
 			$line['total_vat']     = $this->round_money( $line['goods_vat'] + $line['shipping_vat'] );
 			$line['including_vat'] = $this->round_money( $line['goods_amount_ex_vat'] + $line['shipping_excluding_vat'] + $line['total_vat'] );
@@ -2335,6 +2409,19 @@ class WCPRSV_Plugin {
 		}
 
 		return $this->round_money( (float) WC()->cart->get_total( 'edit' ) );
+	}
+
+	/**
+	 * Get the current cart tax total.
+	 *
+	 * @return float
+	 */
+	private function get_cart_tax_total() {
+		if ( ! function_exists( 'WC' ) || ! WC()->cart ) {
+			return 0.0;
+		}
+
+		return $this->round_money( array_sum( array_map( 'floatval', (array) WC()->cart->get_taxes() ) ) );
 	}
 
 	/**

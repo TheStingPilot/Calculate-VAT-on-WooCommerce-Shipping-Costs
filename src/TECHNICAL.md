@@ -1,6 +1,6 @@
 # Technical Documentation
 
-Version: 1.0.8
+Version: 1.0.11
 
 This plugin calculates the VAT composition of WooCommerce shipping costs according to the Dutch pro-rata principle. The customer pays one shipping amount including VAT. That inclusive amount is split across the VAT rates present in the cart, based on the value of the goods excluding VAT per rate.
 
@@ -11,7 +11,7 @@ The plugin supports:
 - WooCommerce HPOS.
 - WP Overnight PDF Invoices & Packing Slips invoices and credit notes.
 - Manual recalculation of existing orders.
-- WPML source language `nl`.
+- WPML source language `en`.
 
 ## Files
 
@@ -141,7 +141,8 @@ These constants are the WordPress option names used by the plugin.
 Registers hooks:
 
 - Adds settings to `WooCommerce > Settings > Tax`.
-- Forces the WPML source language to `nl` when tax settings are saved.
+- Migrates existing installations to WPML source language `en` in the WordPress admin.
+- Forces the WPML source language to `en` when tax settings are saved.
 
 #### `is_enabled()`
 
@@ -163,7 +164,7 @@ Returns whether debug mode is enabled.
 
 #### `get_wpml_source_language()`
 
-Returns the WPML source language. Default: `nl`.
+Returns the WPML source language. Default: `en`.
 
 The value can be filtered with:
 
@@ -183,7 +184,7 @@ If WPML is not active, it falls back to the source language.
 
 #### `force_wpml_source_language()`
 
-Stores `nl` as the source language. This follows the same design as the Toko Lariso Free Shipping Bar Pro plugin: Dutch data is treated as the source data.
+Stores `en` as the source language. This follows the same design as the Toko Lariso Free Shipping Bar Pro plugin: the plugin explicitly controls the WPML source-language value. Existing `nl` values from older plugin versions are migrated to `en` in the admin.
 
 #### `add_tax_settings($settings, $current_section)`
 
@@ -233,6 +234,18 @@ Important hooks:
 #### `load_textdomain()`
 
 Loads translation files from `/languages` when present.
+
+#### `sync_wpml_string_source_language()`
+
+Synchronizes existing WPML String Translation records for this plugin's text domain to the English source language.
+
+Records in the `icl_strings` table with context `wc-pro-rata-shipping-vat` are updated to source language `en`, so WPML String Translation treats the plugin's gettext strings as English source strings.
+
+The update is limited to this plugin's text domain and runs in the WordPress admin when WPML String Translation is available.
+
+#### `is_wpml_string_translation_available()`
+
+Checks whether WPML String Translation appears to be active before attempting to synchronize string source language records.
 
 #### `recalculate_package_rates($rates, $package)`
 
@@ -855,6 +868,6 @@ The plugin still shows a VAT specification for free shipping and pickup. Shippin
 
 For orders and invoices, the plugin uses stored order data or reconstructs from order lines. This keeps invoices reproducible.
 
-### 6. WPML source language is Dutch
+### 6. WPML source language is English
 
-The plugin follows the Toko Lariso approach: Dutch (`nl`) is the source language. WPML can provide the current frontend language, but the source logic remains Dutch.
+The plugin follows the Toko Lariso approach for explicit source-language control: English (`en`) is the source language. WPML can provide the current frontend language, but the gettext source logic remains English.

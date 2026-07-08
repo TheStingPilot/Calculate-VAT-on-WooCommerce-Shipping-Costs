@@ -112,7 +112,7 @@ $snapshot = array(
 		'currency_minor_unit'  => 2,
 		'tax_lines'            => array(
 			array(
-				'name'  => '21% BTW Nederland',
+				'name'  => '21% VAT Netherlands',
 				'price' => '321',
 				'rate'  => '21',
 			),

@@ -50,7 +50,10 @@
 .wcprsv-totals {
 	display: grid;
 	gap: 5px;
-	margin: 10px 0;
+	margin: 12px 0 10px;
+	padding: 7px 0;
+	border-top: 1px solid rgba(17, 43, 74, 0.28);
+	border-bottom: 1px solid rgba(17, 43, 74, 0.28);
 }
 
 .wcprsv-totals__row,
@@ -61,9 +64,19 @@
 	gap: 16px;
 }
 
+.wcprsv-detail-line > div:last-child {
+	margin-top: 4px;
+	padding-top: 3px;
+}
+
+.wcprsv-detail-line > div:last-child > strong {
+	padding-top: 2px;
+	border-top: 1px solid rgba(17, 43, 74, 0.42);
+	border-bottom: 3px double rgba(17, 43, 74, 0.42);
+}
+
 .wcprsv-totals__row--grand {
-	padding-top: 6px;
-	border-top: 1px solid rgba(17, 43, 74, 0.12);
+	font-weight: 700;
 }
 
 .wcprsv-details {

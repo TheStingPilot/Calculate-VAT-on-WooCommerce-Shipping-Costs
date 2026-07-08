@@ -25,6 +25,7 @@ class WCPRSV_Settings {
 	 */
 	public function init() {
 		add_filter( 'woocommerce_get_settings_tax', array( $this, 'add_tax_settings' ), 20, 2 );
+		add_action( 'admin_init', array( $this, 'force_wpml_source_language' ), 5 );
 		add_action( 'woocommerce_update_options_tax', array( $this, 'force_wpml_source_language' ), 20 );
 	}
 
@@ -67,10 +68,15 @@ class WCPRSV_Settings {
 	 * @return string
 	 */
 	public function get_wpml_source_language() {
-		$language = get_option( self::OPTION_WPML_SOURCE_LANGUAGE, 'nl' );
+		$language = get_option( self::OPTION_WPML_SOURCE_LANGUAGE, 'en' );
+
+		if ( 'nl' === $language ) {
+			$language = 'en';
+		}
+
 		$language = apply_filters( 'wcprsv_wpml_source_language', $language );
 
-		return $language ? (string) $language : 'nl';
+		return $language ? (string) $language : 'en';
 	}
 
 	/**
@@ -91,12 +97,12 @@ class WCPRSV_Settings {
 	}
 
 	/**
-	 * Keep Dutch as the source language, matching the Toko Lariso plugin pattern.
+	 * Keep English as the source language for WPML String Translation.
 	 *
 	 * @return void
 	 */
 	public function force_wpml_source_language() {
-		update_option( self::OPTION_WPML_SOURCE_LANGUAGE, 'nl', false );
+		update_option( self::OPTION_WPML_SOURCE_LANGUAGE, 'en', false );
 	}
 
 	/**
@@ -150,8 +156,8 @@ class WCPRSV_Settings {
 				'type'  => 'title',
 				'desc'  => sprintf(
 					/* translators: %s: language code. */
-					__( 'Dutch (%s) is used as the source language for plugin behavior when WPML is active.', 'wc-pro-rata-shipping-vat' ),
-					'nl'
+					__( 'English (%s) is used as the source language for plugin behavior when WPML is active.', 'wc-pro-rata-shipping-vat' ),
+					'en'
 				),
 				'id'    => 'wcprsv_wpml_options',
 			),

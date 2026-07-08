@@ -54,15 +54,40 @@ See `TECHNICAL.md` for a file-by-file and function-by-function explanation of th
 
 ## WPML Behavior
 
-The plugin uses Dutch as the source language:
+The plugin uses English as the source language:
 
 ```text
-nl
+en
 ```
 
-When WPML is active, the current frontend language is read through the `wpml_current_language` filter. The source language can be filtered with `wcprsv_wpml_source_language`, but the admin settings keep the stored source language on Dutch by default.
+When WPML is active, the current frontend language is read through the `wpml_current_language` filter. The source language can be filtered with `wcprsv_wpml_source_language`, but the admin settings keep the stored source language on English by default.
 
 ## Changelog
+
+### 1.0.14
+
+- Limit the single and double underline in the expanded VAT calculation to the final amount only.
+
+### 1.0.13
+
+- Add a single top line and double bottom line around the final total in the expanded VAT calculation.
+
+### 1.0.12
+
+- Add top and bottom divider lines around the VAT specification totals block.
+- Keep the grand total emphasized without adding a separate internal divider.
+
+### 1.0.11
+
+- Change plugin gettext source strings from Dutch to English.
+- Use English (`en`) as the WPML String Translation source language.
+- Reconcile the cart/checkout VAT specification against WooCommerce's cart tax total to prevent one-cent tax mismatches.
+- Keep the displayed VAT specification internally consistent by reconciling the inclusive total after tax rounding.
+
+### 1.0.10
+
+- Synchronize existing WPML String Translation records for this text domain to the configured source language.
+- Prevent WPML from continuing to show the plugin's gettext strings under the wrong source language after scanning.
 
 ### 1.0.9
 
@@ -71,7 +96,7 @@ When WPML is active, the current frontend language is read through the `wpml_cur
 
 ### 1.0.8
 
-- Add WPML-aware source language handling with Dutch (`nl`) as the fixed source language, matching the Toko Lariso free shipping bar pattern.
+- Add WPML-aware source language handling, matching the Toko Lariso free shipping bar pattern.
 - Add current/source language information to debug output when WPML is active.
 - Load the plugin text domain from `/languages` when translation files are present.
 - Add technical documentation with file-by-file and function-by-function explanations.
