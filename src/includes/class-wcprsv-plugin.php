@@ -2278,6 +2278,8 @@ class WCPRSV_Plugin {
 		}
 
 		$cart_total_including     = is_a( $order, 'WC_Order' ) ? 0.0 : $this->get_cart_total_including_vat();
+		$order_total_including    = is_a( $order, 'WC_Order' ) ? $this->round_money( $order->get_total() ) : 0.0;
+		$target_total_including   = $cart_total_including > 0 ? $cart_total_including : $order_total_including;
 		$target_shipping_ex       = $this->round_money( $breakdown['shipping_excluding_vat'] );
 		$target_shipping_vat      = $this->round_money( $breakdown['shipping_including_vat'] - $breakdown['shipping_excluding_vat'] );
 		$target_shipping_incl     = $this->round_money( $breakdown['shipping_including_vat'] );
@@ -2305,11 +2307,15 @@ class WCPRSV_Plugin {
 			);
 		}
 
-		$target_goods_total = $cart_total_including > 0 ? $this->round_money( $cart_total_including - $target_shipping_incl ) : $this->sum_display_column( $display_lines, 'goods_amount_ex_vat' ) + $this->sum_display_column( $display_lines, 'goods_vat' );
-		$current_goods_total = $this->round_money(
-			$this->sum_display_column( $display_lines, 'goods_amount_ex_vat' ) + $this->sum_display_column( $display_lines, 'goods_vat' )
-		);
-		$goods_vat_difference = $this->round_money( $target_goods_total - $current_goods_total );
+		$goods_vat_difference = 0.0;
+
+		if ( $cart_total_including > 0 ) {
+			$target_goods_total = $this->round_money( $cart_total_including - $target_shipping_incl );
+			$current_goods_total = $this->round_money(
+				$this->sum_display_column( $display_lines, 'goods_amount_ex_vat' ) + $this->sum_display_column( $display_lines, 'goods_vat' )
+			);
+			$goods_vat_difference = $this->round_money( $target_goods_total - $current_goods_total );
+		}
 
 		if ( 0.0 !== $goods_vat_difference ) {
 			$display_lines[ $largest_key ]['goods_vat'] = $this->round_money(
@@ -2332,14 +2338,14 @@ class WCPRSV_Plugin {
 			}
 		}
 
-		if ( $cart_total_including > 0 ) {
+		if ( $target_total_including > 0 ) {
 			$current_including_total = 0.0;
 
 			foreach ( $display_lines as $line ) {
 				$current_including_total += (float) $line['goods_amount_ex_vat'] + (float) $line['shipping_excluding_vat'] + (float) $line['goods_vat'] + (float) $line['shipping_vat'];
 			}
 
-			$including_difference = $this->round_money( $cart_total_including - $current_including_total );
+			$including_difference = $this->round_money( $target_total_including - $current_including_total );
 
 			if ( 0.0 !== $including_difference ) {
 				$display_lines[ $largest_key ]['goods_amount_ex_vat'] = $this->round_money(

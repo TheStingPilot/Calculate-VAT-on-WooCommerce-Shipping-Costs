@@ -64,6 +64,11 @@ When WPML is active, the current frontend language is read through the `wpml_cur
 
 ## Changelog
 
+### 1.0.18
+
+- Reconcile order and PDF VAT specification display totals against the WooCommerce order total.
+- Add regression coverage for a free-shipping order where stored VAT and rounded goods excluding VAT otherwise differ by one cent.
+
 ### 1.0.17
 
 - Use consistent `excl. VAT` wording for goods and shipping columns in the PDF VAT specification.

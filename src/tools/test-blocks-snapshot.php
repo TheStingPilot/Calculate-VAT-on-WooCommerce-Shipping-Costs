@@ -48,6 +48,46 @@ if ( ! class_exists( 'WC_Tax' ) ) {
 	}
 }
 
+if ( ! class_exists( 'WC_Order' ) ) {
+	class WC_Order {
+		private $total;
+		private $tax_items;
+
+		public function __construct( $total, array $tax_items ) {
+			$this->total     = $total;
+			$this->tax_items = $tax_items;
+		}
+
+		public function get_total() {
+			return $this->total;
+		}
+
+		public function get_items( $type = '' ) {
+			return 'tax' === $type ? $this->tax_items : array();
+		}
+	}
+}
+
+if ( ! class_exists( 'WCPRSV_Test_Tax_Item' ) ) {
+	class WCPRSV_Test_Tax_Item {
+		private $rate_id;
+		private $tax_total;
+
+		public function __construct( $rate_id, $tax_total ) {
+			$this->rate_id   = $rate_id;
+			$this->tax_total = $tax_total;
+		}
+
+		public function get_rate_id() {
+			return $this->rate_id;
+		}
+
+		public function get_tax_total() {
+			return $this->tax_total;
+		}
+	}
+}
+
 require_once dirname( __DIR__ ) . '/includes/class-wcprsv-calculator.php';
 require_once dirname( __DIR__ ) . '/includes/class-wcprsv-settings.php';
 require_once dirname( __DIR__ ) . '/includes/class-wcprsv-plugin.php';
@@ -144,8 +184,52 @@ $snapshot = array(
 $method = $reflection->getMethod( 'calculate_breakdown_from_blocks_snapshot' );
 $method->setAccessible( true );
 
+$display_lines_method = $reflection->getMethod( 'get_display_lines' );
+$display_lines_method->setAccessible( true );
+
 $credit_note_method = $reflection->getMethod( 'get_credit_note_breakdown' );
 $credit_note_method->setAccessible( true );
+
+$free_shipping_order_breakdown = array(
+	'shipping_including_vat' => 0.0,
+	'shipping_excluding_vat' => 0.0,
+	'taxes'                  => array(
+		'10' => 0.0,
+	),
+	'lines'                  => array(
+		'10' => array(
+			'goods_amount_ex_vat'    => 63.21,
+			'vat_rate'               => 0.09,
+			'share'                  => 1,
+			'shipping_excluding_vat' => 0.0,
+			'shipping_vat'           => 0.0,
+			'shipping_including_vat' => 0.0,
+		),
+	),
+);
+$order_with_one_cent_display_delta = new WC_Order(
+	68.90,
+	array(
+		new WCPRSV_Test_Tax_Item( '10', 5.68 ),
+	)
+);
+$display_lines = $display_lines_method->invoke(
+	$plugin,
+	$free_shipping_order_breakdown['lines'],
+	$free_shipping_order_breakdown,
+	$order_with_one_cent_display_delta
+);
+$display_line = $display_lines['10'] ?? array();
+
+if (
+	63.22 !== ( $display_line['goods_amount_ex_vat'] ?? null ) ||
+	5.68 !== ( $display_line['goods_vat'] ?? null ) ||
+	68.90 !== ( $display_line['including_vat'] ?? null )
+) {
+	echo json_encode( $display_lines, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES ) . PHP_EOL;
+	fwrite( STDERR, 'Blocks snapshot test failed: order/PDF display lines should reconcile to the WooCommerce order total without changing stored VAT.' . PHP_EOL );
+	exit( 1 );
+}
 
 $result = $method->invoke( $plugin, $snapshot );
 $expected = $breakdown;
