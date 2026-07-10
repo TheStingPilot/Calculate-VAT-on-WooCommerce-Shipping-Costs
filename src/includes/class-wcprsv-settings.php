@@ -14,7 +14,6 @@ if ( ! defined( 'ABSPATH' ) ) {
  */
 class WCPRSV_Settings {
 	const OPTION_ENABLED            = 'wcprsv_enabled';
-	const OPTION_REFERENCE_VAT_RATE = 'wcprsv_reference_vat_rate';
 	const OPTION_DEBUG              = 'wcprsv_debug';
 	const OPTION_WPML_SOURCE_LANGUAGE = 'wcprsv_wpml_source_language';
 
@@ -36,21 +35,6 @@ class WCPRSV_Settings {
 	 */
 	public function is_enabled() {
 		return 'yes' === get_option( self::OPTION_ENABLED, 'yes' );
-	}
-
-	/**
-	 * Reference VAT rate used by existing shipping settings.
-	 *
-	 * @return float Decimal VAT rate.
-	 */
-	public function get_reference_vat_rate() {
-		$rate = (float) get_option( self::OPTION_REFERENCE_VAT_RATE, '9' );
-
-		if ( $rate < 0 ) {
-			$rate = 0;
-		}
-
-		return $rate / 100;
 	}
 
 	/**
@@ -130,19 +114,6 @@ class WCPRSV_Settings {
 				'default' => 'yes',
 				'type'    => 'checkbox',
 				'desc'    => __( 'Recalculate shipping VAT when the cart contains taxable goods.', 'wc-pro-rata-shipping-vat' ),
-			),
-			array(
-				'title'             => __( 'Reference VAT rate for configured shipping costs', 'wc-pro-rata-shipping-vat' ),
-				'id'                => self::OPTION_REFERENCE_VAT_RATE,
-				'default'           => '9',
-				'type'              => 'number',
-				'css'               => 'width:80px;',
-				'custom_attributes' => array(
-					'step' => '0.01',
-					'min'  => '0',
-				),
-				'desc'              => __( 'Percentage used to convert existing shipping costs from excluding VAT to including VAT. Use 9 when shipping is currently entered as excluding 9% VAT.', 'wc-pro-rata-shipping-vat' ),
-				'desc_tip'          => true,
 			),
 			array(
 				'title'   => __( 'Debug', 'wc-pro-rata-shipping-vat' ),

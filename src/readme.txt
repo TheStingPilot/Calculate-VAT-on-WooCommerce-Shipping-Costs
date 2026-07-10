@@ -4,7 +4,7 @@ Tags: woocommerce, vat, tax, shipping, netherlands
 Requires at least: 6.0
 Tested up to: 6.6
 Requires PHP: 7.4
-Stable tag: 2.0.0
+Stable tag: 2.1.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -14,7 +14,7 @@ Calculates Dutch pro-rata VAT on WooCommerce shipping costs for carts with mixed
 
 WooCommerce Pro-rata Shipping VAT recalculates shipping VAT when an order contains products with different VAT rates.
 
-The plugin treats the configured shipping cost as an amount excluding a reference VAT rate, converts it to an inclusive customer-facing amount, and then distributes that inclusive amount proportionally across the VAT rates present in the cart.
+The plugin reads WooCommerce's tax settings to decide how configured shipping costs must be interpreted. For stores that enter prices including tax, the configured shipping cost is treated as excluding the WooCommerce shipping tax class and is converted to an inclusive customer-facing amount before the pro-rata split. For stores that enter prices excluding tax, the configured shipping cost is split directly as an excluding-VAT amount.
 
 This is useful for Dutch shops where shipping costs must follow the VAT treatment of the supplied goods.
 
@@ -30,7 +30,7 @@ Example:
 2. Activate "WooCommerce Pro-rata Shipping VAT" in WordPress.
 3. Go to WooCommerce > Settings > Tax.
 4. Enable "Pro-rata shipping VAT".
-5. Set the reference VAT rate for configured shipping costs. Use 9 if your shipping costs are currently entered excluding 9% VAT.
+5. Configure WooCommerce's own "Prices entered with tax" and "Shipping tax class" settings.
 
 == Frequently Asked Questions ==
 
@@ -51,6 +51,12 @@ Shipping rates with a zero cost remain zero. The VAT specification is still show
 The plugin follows the same source-language approach as the Toko Lariso free shipping bar: English (`en`) is the source language. When WPML is active, the current language is read through WPML's current-language filter.
 
 == Changelog ==
+
+= 2.1.0 =
+* Remove the manual reference VAT rate setting from the plugin settings.
+* Read WooCommerce's "Prices entered with tax" and "Shipping tax class" settings as the source for shipping VAT behavior.
+* Support stores that enter prices excluding VAT by splitting configured shipping costs directly as excluding VAT.
+* Add inclusive and exclusive VAT smoke tests, including cent-level rounding checks.
 
 = 1.0.18 =
 * Reconcile order and PDF VAT specification display totals against the WooCommerce order total.

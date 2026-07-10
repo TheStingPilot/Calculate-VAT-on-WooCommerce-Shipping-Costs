@@ -15,7 +15,8 @@ require_once dirname( __DIR__ ) . '/includes/class-wcprsv-calculator.php';
 $calculator = new WCPRSV_Calculator();
 
 $cases = array(
-	'mixed spreadsheet case' => array(
+	'inclusive mixed spreadsheet case' => array(
+		'mode'     => 'including_reference',
 		'goods'    => array(
 			'0'  => array(
 				'amount_ex_vat' => 0.0,
@@ -39,7 +40,8 @@ $cases = array(
 			),
 		),
 	),
-	'all 21 percent'         => array(
+	'inclusive all 21 percent'         => array(
+		'mode'     => 'including_reference',
 		'goods'    => array(
 			'21' => array(
 				'amount_ex_vat' => 100.0,
@@ -54,7 +56,8 @@ $cases = array(
 			),
 		),
 	),
-	'all 0 percent'          => array(
+	'inclusive all 0 percent'          => array(
+		'mode'     => 'including_reference',
 		'goods'    => array(
 			'0' => array(
 				'amount_ex_vat' => 100.0,
@@ -69,10 +72,69 @@ $cases = array(
 			),
 		),
 	),
+	'exclusive mixed spreadsheet case' => array(
+		'mode'     => 'excluding',
+		'goods'    => array(
+			'0'  => array(
+				'amount_ex_vat' => 0.0,
+				'rate'          => 0.0,
+			),
+			'9'  => array(
+				'amount_ex_vat' => 45.79,
+				'rate'          => 0.09,
+			),
+			'21' => array(
+				'amount_ex_vat' => 7.69,
+				'rate'          => 0.21,
+			),
+		),
+		'expect'   => array(
+			'shipping_including_vat' => 6.59,
+			'shipping_excluding_vat' => 5.95,
+			'taxes'                  => array(
+				'9'  => 0.46,
+				'21' => 0.18,
+			),
+		),
+	),
+	'exclusive all 9 percent'          => array(
+		'mode'     => 'excluding',
+		'goods'    => array(
+			'9' => array(
+				'amount_ex_vat' => 100.0,
+				'rate'          => 0.09,
+			),
+		),
+		'expect'   => array(
+			'shipping_including_vat' => 6.49,
+			'shipping_excluding_vat' => 5.95,
+			'taxes'                  => array(
+				'9' => 0.54,
+			),
+		),
+	),
+	'exclusive all 21 percent'         => array(
+		'mode'     => 'excluding',
+		'goods'    => array(
+			'21' => array(
+				'amount_ex_vat' => 100.0,
+				'rate'          => 0.21,
+			),
+		),
+		'expect'   => array(
+			'shipping_including_vat' => 7.20,
+			'shipping_excluding_vat' => 5.95,
+			'taxes'                  => array(
+				'21' => 1.25,
+			),
+		),
+	),
 );
 
 foreach ( $cases as $name => $case ) {
-	$result = $calculator->calculate( 6.38, 0.09, $case['goods'], 2 );
+	$result = 'excluding' === $case['mode']
+		? $calculator->calculate_from_excluding_vat( 5.95, $case['goods'], 2 )
+		: $calculator->calculate( 6.38, 0.09, $case['goods'], 2 );
 	$actual = array(
 		'shipping_including_vat' => $result['shipping_including_vat'],
 		'shipping_excluding_vat' => $result['shipping_excluding_vat'],

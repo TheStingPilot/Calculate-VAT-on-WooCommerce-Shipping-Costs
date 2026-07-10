@@ -6,7 +6,11 @@ Authors: TheStingPilot and Codex.
 
 ## What It Does
 
-The plugin is intended for shops where shipping costs are configured as an amount excluding a reference VAT rate, for example `6.38` excluding `9%` VAT. It first converts that amount to the inclusive customer-facing shipping total, then splits that inclusive total pro-rata over the VAT rates present in the cart.
+The plugin reads WooCommerce's own tax settings to decide how configured shipping costs must be interpreted.
+
+For shops where prices are entered including VAT, WooCommerce shipping costs are configured as an amount excluding the WooCommerce shipping tax class. For example, `6.38` excluding `9%` VAT becomes `6.95` including VAT. The plugin then splits that inclusive customer-facing shipping total pro-rata over the VAT rates present in the cart.
+
+For shops where prices are entered excluding VAT, WooCommerce shipping costs are already excluding VAT. The plugin splits that excluding-VAT shipping amount directly over the VAT rates present in the cart, then calculates the VAT per rate.
 
 For example:
 
@@ -19,11 +23,19 @@ If the cart contains both 9% and 21% goods, the `6.95` total is distributed by t
 ## Calculation
 
 ```text
-shipping_including_vat = configured_shipping_cost * (1 + reference_vat_rate)
+shipping_including_vat = configured_shipping_cost * (1 + WooCommerce shipping tax class rate)
 share_per_vat_rate = goods_excluding_vat_for_rate / total_goods_excluding_vat
 shipping_including_vat_for_rate = shipping_including_vat * share_per_vat_rate
 shipping_excluding_vat_for_rate = shipping_including_vat_for_rate / (1 + vat_rate)
 shipping_vat_for_rate = shipping_including_vat_for_rate - shipping_excluding_vat_for_rate
+```
+
+For shops with prices entered excluding VAT:
+
+```text
+shipping_excluding_vat_for_rate = configured_shipping_cost * share_per_vat_rate
+shipping_vat_for_rate = shipping_excluding_vat_for_rate * vat_rate
+shipping_including_vat_for_rate = shipping_excluding_vat_for_rate + shipping_vat_for_rate
 ```
 
 The final WooCommerce shipping rate is updated with:
@@ -40,9 +52,9 @@ Go to `WooCommerce > Settings > Tax`.
 The plugin adds:
 
 - Enable pro-rata shipping VAT
-- Reference VAT rate for configured shipping costs
+- Debug logging
 
-Use `9` as the reference VAT rate when your shipping method is currently configured as excluding 9% VAT.
+The plugin uses WooCommerce's own `Prices entered with tax` setting and `Shipping tax class` setting. No separate reference VAT rate is configured in the plugin.
 
 ## Customer Display
 
@@ -63,6 +75,13 @@ en
 When WPML is active, the current frontend language is read through the `wpml_current_language` filter. The source language can be filtered with `wcprsv_wpml_source_language`, but the admin settings keep the stored source language on English by default.
 
 ## Changelog
+
+### 2.1.0
+
+- Remove the manual reference VAT rate setting from the plugin settings.
+- Read WooCommerce's `Prices entered with tax` and `Shipping tax class` settings as the source for shipping VAT behavior.
+- Support stores that enter prices excluding VAT by splitting configured shipping costs directly as excluding VAT.
+- Add inclusive and exclusive VAT smoke tests, including cent-level rounding checks.
 
 ### 1.0.18
 

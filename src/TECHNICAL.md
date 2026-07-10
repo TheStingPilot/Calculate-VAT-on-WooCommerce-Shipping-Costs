@@ -1,8 +1,12 @@
 # Technical Documentation
 
-Version: 1.0.11
+Version: 2.1.0
 
-This plugin calculates the VAT composition of WooCommerce shipping costs according to the Dutch pro-rata principle. The customer pays one shipping amount including VAT. That inclusive amount is split across the VAT rates present in the cart, based on the value of the goods excluding VAT per rate.
+This plugin calculates the VAT composition of WooCommerce shipping costs according to the Dutch pro-rata principle. It reads WooCommerce's own tax settings to decide how configured shipping costs must be interpreted.
+
+When WooCommerce prices are entered including VAT, the configured shipping cost is treated as excluding the WooCommerce shipping tax class. The plugin first converts that configured cost to the customer-facing inclusive shipping amount and then splits that amount across the VAT rates present in the cart.
+
+When WooCommerce prices are entered excluding VAT, the configured shipping cost is already excluding VAT. The plugin splits that excluding-VAT shipping amount directly across the VAT rates present in the cart and then calculates VAT per rate.
 
 The plugin supports:
 
@@ -55,7 +59,7 @@ This class contains only the calculation logic. It does not know about WordPress
 
 #### `calculate($shipping_excluding_reference_vat, $reference_vat_rate, array $goods_by_tax_rate, $price_decimals = 2)`
 
-Used when WooCommerce stores shipping costs as an amount excluding a reference VAT rate.
+Used for shops where WooCommerce prices are entered including VAT. The reference VAT rate is no longer a plugin setting; it is derived from WooCommerce's `woocommerce_shipping_tax_class` setting.
 
 Example:
 
@@ -68,6 +72,26 @@ The function:
 - Prevents negative input from affecting the result.
 - First converts the configured shipping amount to an inclusive shipping amount.
 - Calls `calculate_from_including_vat()`.
+
+#### `calculate_from_excluding_vat($shipping_excluding_vat, array $goods_by_tax_rate, $price_decimals = 2)`
+
+Used for shops where WooCommerce prices are entered excluding VAT.
+
+Input:
+
+- Total shipping amount excluding VAT.
+- Goods amount excluding VAT per VAT rate.
+- Number of price decimals.
+
+The function:
+
+- Calculates the total goods amount excluding VAT.
+- Determines each VAT rate's share of the goods value.
+- Splits the excluding-VAT shipping amount over those shares.
+- Calculates shipping VAT per rate.
+- Calculates shipping including VAT per rate.
+- Rounds visible and reusable monetary values per cell, similar to Excel `ROUND(..., 2)`.
+- Applies any cent-level excluding-VAT rounding difference to the largest goods group.
 
 #### `calculate_from_including_vat($shipping_including_vat, array $goods_by_tax_rate, $price_decimals = 2)`
 
@@ -129,7 +153,6 @@ This class manages the plugin settings in WooCommerce.
 
 ```text
 OPTION_ENABLED
-OPTION_REFERENCE_VAT_RATE
 OPTION_DEBUG
 OPTION_WPML_SOURCE_LANGUAGE
 ```
@@ -147,16 +170,6 @@ Registers hooks:
 #### `is_enabled()`
 
 Returns whether the plugin is enabled. Default: `yes`.
-
-#### `get_reference_vat_rate()`
-
-Reads the reference VAT percentage from settings and returns it as a decimal.
-
-Example:
-
-```text
-9 becomes 0.09
-```
 
 #### `is_debug_enabled()`
 
@@ -191,9 +204,13 @@ Stores `en` as the source language. This follows the same design as the Toko Lar
 Adds settings to the WooCommerce tax settings page:
 
 - Enable or disable the plugin.
-- Reference VAT rate.
 - Debug mode.
 - WPML source-language explanation.
+
+The plugin deliberately does not add its own reference VAT rate setting. It uses WooCommerce's own tax settings:
+
+- `woocommerce_prices_include_tax`
+- `woocommerce_shipping_tax_class`
 
 ## WooCommerce Integration
 
@@ -255,8 +272,9 @@ The function:
 
 - Checks whether the plugin and WooCommerce taxes are enabled.
 - Groups goods by VAT rate.
-- Reads the configured shipping cost excluding the reference VAT rate.
-- Calculates the pro-rata split.
+- Reads WooCommerce's configured shipping cost.
+- For shops with prices entered including VAT, converts the configured shipping cost with the WooCommerce shipping tax class before the pro-rata split.
+- For shops with prices entered excluding VAT, splits the configured shipping cost directly as excluding VAT.
 - Sets the shipping cost to the total excluding VAT.
 - Sets shipping taxes per WooCommerce tax rate ID.
 - Stores the breakdown as rate metadata and in the WooCommerce session.
@@ -828,10 +846,10 @@ Standalone smoke test for the calculator.
 
 Checks include:
 
-- 9% calculation.
-- 21% calculation.
-- Mixed-rate calculations.
-- Rounding.
+- Inclusive-price shops where the configured shipping amount is converted through WooCommerce's shipping tax class first.
+- Excluding-price shops where the configured shipping amount is split directly as excluding VAT.
+- 9%, 21%, and mixed-rate calculations.
+- Cent-level rounding.
 
 ### `tools/test-blocks-snapshot.php`
 
@@ -842,15 +860,16 @@ Checks include:
 - Store API metadata enrichment.
 - Paid shipping with metadata.
 - Paid shipping without metadata.
+- Excluding-price shops with paid shipping and missing Blocks metadata.
 - Integer Store API amounts as minor units.
 - Free shipping or pickup with zero shipping amounts.
 - Stale paid metadata when shipping is free.
 
 ## Main Design Choices
 
-### 1. The inclusive shipping total is leading
+### 1. WooCommerce tax entry mode is leading
 
-The customer sees one shipping amount including VAT. The plugin must not change that amount. It only changes the split between excluding VAT and VAT.
+For shops where prices are entered including VAT, the customer-facing inclusive shipping total is leading. For shops where prices are entered excluding VAT, the configured excluding-VAT shipping amount is leading. The plugin uses WooCommerce's own tax settings to choose the correct path.
 
 ### 2. Round per cell
 

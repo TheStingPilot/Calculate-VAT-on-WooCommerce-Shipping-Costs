@@ -20,6 +20,26 @@ if ( ! function_exists( 'wc_get_price_decimals' ) ) {
 	}
 }
 
+if ( ! function_exists( 'wc_prices_include_tax' ) ) {
+	function wc_prices_include_tax() {
+		return ! empty( $GLOBALS['wcprsv_test_prices_include_tax'] );
+	}
+}
+
+if ( ! function_exists( 'get_option' ) ) {
+	function get_option( $key, $default = false ) {
+		if ( 'woocommerce_prices_include_tax' === $key ) {
+			return ! empty( $GLOBALS['wcprsv_test_prices_include_tax'] ) ? 'yes' : 'no';
+		}
+
+		if ( 'woocommerce_shipping_tax_class' === $key ) {
+			return 'reduced-rate';
+		}
+
+		return $default;
+	}
+}
+
 if ( ! function_exists( 'absint' ) ) {
 	function absint( $value ) {
 		return abs( (int) $value );
@@ -43,6 +63,20 @@ if ( ! class_exists( 'WC_Tax' ) ) {
 		public static function _get_tax_rate( $rate_id ) {
 			return array(
 				'tax_rate' => '1' === (string) $rate_id ? 21 : 9,
+			);
+		}
+
+		public static function get_shipping_tax_rates( $tax_class = null ) {
+			return array(
+				array(
+					'rate' => 9,
+				),
+			);
+		}
+
+		public static function calc_tax( $price, $rates, $price_includes_tax = false ) {
+			return array(
+				(float) $price * 0.09,
 			);
 		}
 	}
@@ -93,6 +127,8 @@ require_once dirname( __DIR__ ) . '/includes/class-wcprsv-settings.php';
 require_once dirname( __DIR__ ) . '/includes/class-wcprsv-plugin.php';
 
 echo 'Running Blocks snapshot tests...' . PHP_EOL;
+
+$GLOBALS['wcprsv_test_prices_include_tax'] = true;
 
 $breakdown = array(
 	'shipping_including_vat' => 6.95,
@@ -274,6 +310,57 @@ if (
 	fwrite( STDERR, 'Blocks snapshot test failed: paid shipping should be reconstructed when Blocks metadata is missing.' . PHP_EOL );
 	exit( 1 );
 }
+
+$GLOBALS['wcprsv_test_prices_include_tax'] = false;
+
+$exclusive_snapshot = $metadata_lost_snapshot;
+$exclusive_snapshot['totals']['total_shipping']     = '595';
+$exclusive_snapshot['totals']['total_shipping_tax'] = '064';
+$exclusive_snapshot['totals']['tax_lines']          = array(
+	array(
+		'name'  => '9% VAT Netherlands',
+		'price' => '458',
+		'rate'  => '9',
+	),
+	array(
+		'name'  => '21% VAT Netherlands',
+		'price' => '180',
+		'rate'  => '21',
+	),
+);
+$exclusive_snapshot['cartData']['items']            = array(
+	array(
+		'totals' => array(
+			'line_subtotal'     => '4579',
+			'line_subtotal_tax' => '412',
+		),
+	),
+	array(
+		'totals' => array(
+			'line_subtotal'     => '769',
+			'line_subtotal_tax' => '162',
+		),
+	),
+);
+
+$result = $method->invoke( $plugin, $exclusive_snapshot );
+
+if (
+	6.59 !== ( $result['shipping_including_vat'] ?? null ) ||
+	5.95 !== ( $result['shipping_excluding_vat'] ?? null ) ||
+	0.46 !== ( $result['taxes']['0.090000'] ?? null ) ||
+	0.18 !== ( $result['taxes']['0.210000'] ?? null ) ||
+	5.09 !== ( $result['lines']['0.090000']['shipping_excluding_vat'] ?? null ) ||
+	0.86 !== ( $result['lines']['0.210000']['shipping_excluding_vat'] ?? null ) ||
+	4.12 !== ( $result['lines']['0.090000']['goods_vat'] ?? null ) ||
+	1.62 !== ( $result['lines']['0.210000']['goods_vat'] ?? null )
+) {
+	echo json_encode( $result, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES ) . PHP_EOL;
+	fwrite( STDERR, 'Blocks snapshot test failed: excluding-tax shops should split shipping from the excluding-VAT amount.' . PHP_EOL );
+	exit( 1 );
+}
+
+$GLOBALS['wcprsv_test_prices_include_tax'] = true;
 
 $snapshot['shippingRates'][0]['shipping_rates'] = array(
 	array_merge(

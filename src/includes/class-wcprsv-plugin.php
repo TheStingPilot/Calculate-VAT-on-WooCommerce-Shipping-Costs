@@ -136,6 +136,123 @@ class WCPRSV_Plugin {
 	}
 
 	/**
+	 * Calculate a breakdown from the shipping cost as configured in WooCommerce.
+	 *
+	 * When product prices are entered including tax, WooCommerce shipping costs
+	 * are treated as excluding the configured shipping tax class. When product
+	 * prices are entered excluding tax, the shipping cost is already excluding
+	 * VAT and is split directly over the goods VAT rates.
+	 *
+	 * @param float $shipping_cost Shipping cost from WooCommerce.
+	 * @param array $goods_by_tax_rate Goods totals keyed by tax rate.
+	 * @param int|null $price_decimals Number of decimals, or null for WooCommerce default.
+	 * @return array
+	 */
+	private function calculate_shipping_breakdown_from_configured_cost( $shipping_cost, array $goods_by_tax_rate, $price_decimals = null ) {
+		$price_decimals = null === $price_decimals ? wc_get_price_decimals() : $price_decimals;
+
+		if ( $this->prices_entered_including_tax() ) {
+			return $this->calculator->calculate(
+				$shipping_cost,
+				$this->get_configured_shipping_reference_vat_rate(),
+				$goods_by_tax_rate,
+				$price_decimals
+			);
+		}
+
+		return $this->calculator->calculate_from_excluding_vat(
+			$shipping_cost,
+			$goods_by_tax_rate,
+			$price_decimals
+		);
+	}
+
+	/**
+	 * Calculate a breakdown from current WooCommerce shipping totals.
+	 *
+	 * @param float $shipping_excluding_vat Shipping excluding VAT.
+	 * @param float $shipping_vat Shipping VAT.
+	 * @param array $goods_by_tax_rate Goods totals keyed by tax rate.
+	 * @param int|null $price_decimals Number of decimals, or null for WooCommerce default.
+	 * @return array
+	 */
+	private function calculate_shipping_breakdown_from_totals( $shipping_excluding_vat, $shipping_vat, array $goods_by_tax_rate, $price_decimals = null ) {
+		$price_decimals = null === $price_decimals ? wc_get_price_decimals() : $price_decimals;
+
+		if ( $this->prices_entered_including_tax() ) {
+			return $this->calculator->calculate_from_including_vat(
+				(float) $shipping_excluding_vat + (float) $shipping_vat,
+				$goods_by_tax_rate,
+				$price_decimals
+			);
+		}
+
+		return $this->calculator->calculate_from_excluding_vat(
+			$shipping_excluding_vat,
+			$goods_by_tax_rate,
+			$price_decimals
+		);
+	}
+
+	/**
+	 * Whether WooCommerce product prices are entered including tax.
+	 *
+	 * @return bool
+	 */
+	private function prices_entered_including_tax() {
+		if ( function_exists( 'wc_prices_include_tax' ) ) {
+			return wc_prices_include_tax();
+		}
+
+		return 'yes' === get_option( 'woocommerce_prices_include_tax', 'no' );
+	}
+
+	/**
+	 * Get the shipping tax class rate used as reference for inclusive shops.
+	 *
+	 * @return float Decimal VAT rate.
+	 */
+	private function get_configured_shipping_reference_vat_rate() {
+		$tax_class = get_option( 'woocommerce_shipping_tax_class', '' );
+
+		if ( 'inherit' === $tax_class ) {
+			return 0.0;
+		}
+
+		if ( ! class_exists( 'WC_Tax' ) ) {
+			return 0.0;
+		}
+
+		if ( method_exists( 'WC_Tax', 'get_shipping_tax_rates' ) ) {
+			$rates = WC_Tax::get_shipping_tax_rates( $tax_class );
+		} elseif ( method_exists( 'WC_Tax', 'get_rates' ) ) {
+			$rates = WC_Tax::get_rates( $tax_class );
+		} else {
+			return 0.0;
+		}
+
+		if ( empty( $rates ) || ! is_array( $rates ) ) {
+			return 0.0;
+		}
+
+		if ( method_exists( 'WC_Tax', 'calc_tax' ) ) {
+			return $this->round_money( array_sum( WC_Tax::calc_tax( 100, $rates, false ) ) ) / 100;
+		}
+
+		$rate = 0.0;
+
+		foreach ( $rates as $tax_rate ) {
+			if ( isset( $tax_rate['rate'] ) ) {
+				$rate += (float) $tax_rate['rate'];
+			} elseif ( isset( $tax_rate['tax_rate'] ) ) {
+				$rate += (float) $tax_rate['tax_rate'];
+			}
+		}
+
+		return max( 0.0, $rate / 100 );
+	}
+
+	/**
 	 * Recalculate shipping rate costs and taxes for a package.
 	 *
 	 * @param array $rates Shipping rates.
@@ -164,12 +281,7 @@ class WCPRSV_Plugin {
 				continue;
 			}
 
-			$result = $this->calculator->calculate(
-				$cost,
-				$this->settings->get_reference_vat_rate(),
-				$goods_by_tax_rate,
-				wc_get_price_decimals()
-			);
+			$result = $this->calculate_shipping_breakdown_from_configured_cost( $cost, $goods_by_tax_rate );
 
 			if ( empty( $result['lines'] ) ) {
 				continue;
@@ -180,7 +292,8 @@ class WCPRSV_Plugin {
 				array(
 					'rate_id'                => $rate_id,
 					'original_rate_cost'     => $cost,
-					'reference_vat_rate'     => $this->settings->get_reference_vat_rate(),
+					'prices_include_tax'     => $this->prices_entered_including_tax(),
+					'shipping_reference_vat' => $this->get_configured_shipping_reference_vat_rate(),
 					'goods_by_tax_rate'      => $goods_by_tax_rate,
 					'calculated_breakdown'   => $result,
 				)
@@ -391,17 +504,19 @@ class WCPRSV_Plugin {
 		}
 
 		if ( $item_tax_total > 0 ) {
-			$result = $this->calculator->calculate_from_including_vat(
-				$item_total + $item_tax_total,
+			$result = $this->calculate_shipping_breakdown_from_totals(
+				$item_total,
+				$item_tax_total,
 				$goods_by_tax_rate,
 				wc_get_price_decimals()
 			);
 
 			$this->debug_log(
-				'order_shipping_item_breakdown_from_including',
+				'order_shipping_item_breakdown_from_totals',
 				array(
 					'item_total'        => $item_total,
 					'item_tax_total'    => $item_tax_total,
+					'prices_include_tax' => $this->prices_entered_including_tax(),
 					'goods_by_tax_rate' => $goods_by_tax_rate,
 					'breakdown'         => $result,
 				)
@@ -410,18 +525,14 @@ class WCPRSV_Plugin {
 			return $result;
 		}
 
-		$result = $this->calculator->calculate(
-			$item_total,
-			$this->settings->get_reference_vat_rate(),
-			$goods_by_tax_rate,
-			wc_get_price_decimals()
-		);
+		$result = $this->calculate_shipping_breakdown_from_configured_cost( $item_total, $goods_by_tax_rate );
 
 		$this->debug_log(
-			'order_shipping_item_breakdown_from_reference_rate',
+			'order_shipping_item_breakdown_from_configured_cost',
 			array(
 				'item_total'          => $item_total,
-				'reference_vat_rate'  => $this->settings->get_reference_vat_rate(),
+				'prices_include_tax'  => $this->prices_entered_including_tax(),
+				'shipping_reference_vat' => $this->get_configured_shipping_reference_vat_rate(),
 				'goods_by_tax_rate'   => $goods_by_tax_rate,
 				'breakdown'           => $result,
 			)
@@ -775,6 +886,8 @@ class WCPRSV_Plugin {
 		$goods_by_tax_rate = $this->get_order_goods_by_tax_rate( $order );
 		$shipping_source   = $this->get_order_maintenance_shipping_including_vat( $order );
 		$shipping_incl     = $shipping_source['amount'];
+		$shipping_excl     = $this->round_money( (float) $order->get_shipping_total() );
+		$shipping_tax      = $this->round_money( (float) $order->get_shipping_tax() );
 
 		$result = array(
 			'order_id'             => $order->get_id(),
@@ -793,7 +906,9 @@ class WCPRSV_Plugin {
 			return $result;
 		}
 
-		$breakdown = $this->calculator->calculate_from_including_vat( $shipping_incl, $goods_by_tax_rate, wc_get_price_decimals() );
+		$breakdown = $this->prices_entered_including_tax()
+			? $this->calculator->calculate_from_including_vat( $shipping_incl, $goods_by_tax_rate, wc_get_price_decimals() )
+			: $this->calculate_shipping_breakdown_from_totals( $shipping_excl, $shipping_tax, $goods_by_tax_rate, wc_get_price_decimals() );
 
 		if ( empty( $breakdown['lines'] ) ) {
 			$result['status'] = __( 'Not supported', 'wc-pro-rata-shipping-vat' );
@@ -1289,19 +1404,15 @@ class WCPRSV_Plugin {
 		$rate_tax  = array_sum( array_map( 'floatval', (array) $rate->get_taxes() ) );
 
 		if ( $rate_tax > 0 ) {
-			return $this->calculator->calculate_from_including_vat(
-				$rate_cost + $rate_tax,
+			return $this->calculate_shipping_breakdown_from_totals(
+				$rate_cost,
+				$rate_tax,
 				$goods_by_tax_rate,
 				wc_get_price_decimals()
 			);
 		}
 
-		return $this->calculator->calculate(
-			$rate_cost,
-			$this->settings->get_reference_vat_rate(),
-			$goods_by_tax_rate,
-			wc_get_price_decimals()
-		);
+		return $this->calculate_shipping_breakdown_from_configured_cost( $rate_cost, $goods_by_tax_rate );
 	}
 
 	/**
@@ -1390,10 +1501,9 @@ class WCPRSV_Plugin {
 			return array();
 		}
 
-		$shipping_including_vat = $this->get_current_shipping_including_vat();
-
-		$breakdown = $this->calculator->calculate_from_including_vat(
-			$shipping_including_vat,
+		$breakdown = $this->calculate_shipping_breakdown_from_totals(
+			(float) WC()->cart->get_shipping_total(),
+			(float) WC()->cart->get_shipping_tax(),
 			$goods_by_tax_rate,
 			wc_get_price_decimals()
 		);
@@ -1468,8 +1578,9 @@ class WCPRSV_Plugin {
 			return array();
 		}
 
-		$breakdown = $this->calculator->calculate_from_including_vat(
-			$shipping_including_vat,
+		$breakdown = $this->calculate_shipping_breakdown_from_totals(
+			$this->get_blocks_snapshot_shipping_excluding_vat( $snapshot, $shipping_including_vat ),
+			$this->get_blocks_snapshot_shipping_vat( $snapshot ),
 			$goods_by_tax_rate,
 			$this->get_blocks_snapshot_minor_units( $snapshot )
 		);
@@ -1644,6 +1755,39 @@ class WCPRSV_Plugin {
 		$shipping_tax = $this->parse_store_api_amount( $totals['total_shipping_tax'] ?? 0, $minor_units );
 
 		return $this->round_money( $shipping + $shipping_tax );
+	}
+
+	/**
+	 * Get current shipping excluding VAT from a Blocks cart snapshot.
+	 *
+	 * @param array $snapshot Blocks cart snapshot.
+	 * @param float $fallback_including Fallback inclusive shipping amount.
+	 * @return float
+	 */
+	private function get_blocks_snapshot_shipping_excluding_vat( array $snapshot, $fallback_including = 0.0 ) {
+		$totals      = ! empty( $snapshot['totals'] ) && is_array( $snapshot['totals'] ) ? $snapshot['totals'] : array();
+		$totals      = empty( $totals ) && ! empty( $snapshot['cartData']['totals'] ) && is_array( $snapshot['cartData']['totals'] ) ? $snapshot['cartData']['totals'] : $totals;
+		$minor_units = $this->get_blocks_snapshot_minor_units( $snapshot );
+
+		if ( array_key_exists( 'total_shipping', $totals ) ) {
+			return $this->round_money( $this->parse_store_api_amount( $totals['total_shipping'], $minor_units ) );
+		}
+
+		return $this->round_money( max( 0.0, (float) $fallback_including - $this->get_blocks_snapshot_shipping_vat( $snapshot ) ) );
+	}
+
+	/**
+	 * Get current shipping VAT from a Blocks cart snapshot.
+	 *
+	 * @param array $snapshot Blocks cart snapshot.
+	 * @return float
+	 */
+	private function get_blocks_snapshot_shipping_vat( array $snapshot ) {
+		$totals      = ! empty( $snapshot['totals'] ) && is_array( $snapshot['totals'] ) ? $snapshot['totals'] : array();
+		$totals      = empty( $totals ) && ! empty( $snapshot['cartData']['totals'] ) && is_array( $snapshot['cartData']['totals'] ) ? $snapshot['cartData']['totals'] : $totals;
+		$minor_units = $this->get_blocks_snapshot_minor_units( $snapshot );
+
+		return $this->round_money( $this->parse_store_api_amount( $totals['total_shipping_tax'] ?? 0, $minor_units ) );
 	}
 
 	/**
@@ -2486,13 +2630,15 @@ class WCPRSV_Plugin {
 		}
 
 		$goods_by_tax_rate = $this->get_order_goods_by_tax_rate( $order );
-		$shipping_incl     = $this->round_money( (float) $order->get_shipping_total() + (float) $order->get_shipping_tax() );
+		$shipping_excl     = $this->round_money( (float) $order->get_shipping_total() );
+		$shipping_tax      = $this->round_money( (float) $order->get_shipping_tax() );
+		$shipping_incl     = $this->round_money( $shipping_excl + $shipping_tax );
 
 		if ( empty( $goods_by_tax_rate ) || $shipping_incl <= 0 ) {
 			return array();
 		}
 
-		return $this->calculator->calculate_from_including_vat( $shipping_incl, $goods_by_tax_rate, wc_get_price_decimals() );
+		return $this->calculate_shipping_breakdown_from_totals( $shipping_excl, $shipping_tax, $goods_by_tax_rate, wc_get_price_decimals() );
 	}
 
 	/**
@@ -2524,7 +2670,9 @@ class WCPRSV_Plugin {
 		if ( 0.0 === $shipping_incl ) {
 			$breakdown = $this->build_zero_shipping_breakdown( $absolute_goods );
 		} else {
-			$breakdown = $this->calculator->calculate_from_including_vat( abs( $shipping_incl ), $absolute_goods, wc_get_price_decimals() );
+			$shipping_excl = method_exists( $credit_note, 'get_shipping_total' ) ? abs( (float) $credit_note->get_shipping_total() ) : 0.0;
+			$shipping_tax  = method_exists( $credit_note, 'get_shipping_tax' ) ? abs( (float) $credit_note->get_shipping_tax() ) : 0.0;
+			$breakdown     = $this->calculate_shipping_breakdown_from_totals( $shipping_excl, $shipping_tax, $absolute_goods, wc_get_price_decimals() );
 		}
 
 		if ( empty( $breakdown['lines'] ) ) {

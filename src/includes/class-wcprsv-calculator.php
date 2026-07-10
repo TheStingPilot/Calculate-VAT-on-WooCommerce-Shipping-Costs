@@ -34,6 +34,82 @@ class WCPRSV_Calculator {
 	}
 
 	/**
+	 * Calculate pro-rata shipping amounts from an excluding-VAT shipping amount.
+	 *
+	 * @param float $shipping_excluding_vat Shipping amount excluding VAT.
+	 * @param array $goods_by_tax_rate Goods totals keyed by tax rate ID. Each item requires amount_ex_vat and rate.
+	 * @param int   $price_decimals Number of decimals to use for monetary output.
+	 * @return array
+	 */
+	public function calculate_from_excluding_vat( $shipping_excluding_vat, array $goods_by_tax_rate, $price_decimals = 2 ) {
+		$shipping_excluding_vat = max( 0.0, (float) $shipping_excluding_vat );
+		$price_decimals        = max( 0, (int) $price_decimals );
+		$total_goods           = $this->sum_goods( $goods_by_tax_rate );
+
+		if ( $shipping_excluding_vat <= 0 || $total_goods <= 0 ) {
+			return array(
+				'shipping_including_vat' => round( $shipping_excluding_vat, $price_decimals ),
+				'shipping_excluding_vat' => round( $shipping_excluding_vat, $price_decimals ),
+				'taxes'                  => array(),
+				'lines'                  => array(),
+			);
+		}
+
+		$lines = array();
+		$taxes = array();
+
+		foreach ( $goods_by_tax_rate as $tax_rate_id => $data ) {
+			$goods_amount = max( 0.0, (float) ( $data['amount_ex_vat'] ?? 0 ) );
+			$vat_rate     = max( 0.0, (float) ( $data['rate'] ?? 0 ) );
+
+			if ( $goods_amount <= 0 ) {
+				continue;
+			}
+
+			$share         = $goods_amount / $total_goods;
+			$line_ex       = $shipping_excluding_vat * $share;
+			$line_tax      = $line_ex * $vat_rate;
+			$line_incl     = $line_ex + $line_tax;
+			$tax_rate_id   = (string) $tax_rate_id;
+			$rounded_ex    = round( $line_ex, $price_decimals );
+			$rounded_tax   = round( $line_tax, $price_decimals );
+			$rounded_incl  = round( $rounded_ex + $rounded_tax, $price_decimals );
+			$taxes[ $tax_rate_id ] = $rounded_tax;
+
+			$lines[ $tax_rate_id ] = array(
+				'goods_amount_ex_vat'       => $goods_amount,
+				'vat_rate'                  => $vat_rate,
+				'share'                     => $share,
+				'shipping_excluding_vat'    => $rounded_ex,
+				'shipping_vat'              => $rounded_tax,
+				'shipping_including_vat'    => $rounded_incl,
+				'unrounded_excluding_vat'   => $line_ex,
+				'unrounded_vat'             => $line_tax,
+				'unrounded_including_vat'   => $line_incl,
+			);
+		}
+
+		$target_excluding = round( $shipping_excluding_vat, $price_decimals );
+		$this->apply_excluding_rounding_delta( $lines, $target_excluding, $price_decimals );
+
+		$total_ex  = 0.0;
+		$total_tax = 0.0;
+
+		foreach ( $lines as $key => $line ) {
+			$total_ex  += $line['shipping_excluding_vat'];
+			$total_tax += $line['shipping_vat'];
+			$taxes[ $key ] = $line['shipping_vat'];
+		}
+
+		return array(
+			'shipping_including_vat' => round( $total_ex + $total_tax, $price_decimals ),
+			'shipping_excluding_vat' => round( $total_ex, $price_decimals ),
+			'taxes'                  => $taxes,
+			'lines'                  => $lines,
+		);
+	}
+
+	/**
 	 * Calculate pro-rata shipping amounts from an inclusive shipping amount.
 	 *
 	 * @param float $shipping_including_vat Shipping amount including VAT.
@@ -165,5 +241,42 @@ class WCPRSV_Calculator {
 		$lines[ $largest_key ]['shipping_vat']           = round( $lines[ $largest_key ]['shipping_vat'] + $delta, $price_decimals );
 		$lines[ $largest_key ]['shipping_including_vat'] = round( $lines[ $largest_key ]['shipping_excluding_vat'] + $lines[ $largest_key ]['shipping_vat'], $price_decimals );
 		$taxes[ $largest_key ]                           = $lines[ $largest_key ]['shipping_vat'];
+	}
+
+	/**
+	 * Adjust the largest tax line so rounded excluding-VAT shipping totals match.
+	 *
+	 * @param array $lines Lines keyed by tax rate ID.
+	 * @param float $target_excluding Target excluding-VAT shipping amount.
+	 * @param int   $price_decimals Number of decimals to round to.
+	 * @return void
+	 */
+	private function apply_excluding_rounding_delta( array &$lines, $target_excluding, $price_decimals ) {
+		if ( empty( $lines ) ) {
+			return;
+		}
+
+		$current_excluding = 0.0;
+		$largest_key       = null;
+		$largest_amount    = -1.0;
+
+		foreach ( $lines as $key => $line ) {
+			$current_excluding += $line['shipping_excluding_vat'];
+
+			if ( $line['goods_amount_ex_vat'] > $largest_amount ) {
+				$largest_key    = $key;
+				$largest_amount = $line['goods_amount_ex_vat'];
+			}
+		}
+
+		$delta = round( $target_excluding - $current_excluding, $price_decimals );
+
+		if ( 0.0 === $delta || null === $largest_key ) {
+			return;
+		}
+
+		$lines[ $largest_key ]['shipping_excluding_vat'] = round( $lines[ $largest_key ]['shipping_excluding_vat'] + $delta, $price_decimals );
+		$lines[ $largest_key ]['shipping_vat']           = round( $lines[ $largest_key ]['shipping_excluding_vat'] * $lines[ $largest_key ]['vat_rate'], $price_decimals );
+		$lines[ $largest_key ]['shipping_including_vat'] = round( $lines[ $largest_key ]['shipping_excluding_vat'] + $lines[ $largest_key ]['shipping_vat'], $price_decimals );
 	}
 }
